@@ -1,6 +1,6 @@
-# Local Mobile MCP Server
+# Mobile Simulator & Emulator MCP
 
-A local, stdio-only [Model Context Protocol](https://modelcontextprotocol.io/) server for agent-driven testing on Apple iOS Simulators and Google Android Emulators.
+A local, stdio-only [Model Context Protocol](https://modelcontextprotocol.io/) server that lets coding agents inspect, control, and test Apple iOS Simulators and Google Android Emulators. It exposes 29 typed tools for device lifecycle, app management, UI automation, screenshots, logs, permissions, location, and platform-specific test conditions.
 
 It uses:
 
@@ -25,35 +25,67 @@ adb devices -l
 emulator -list-avds
 ```
 
-## Install
+## Quick start
+
+This package is currently installed from source:
 
 ```bash
+git clone https://github.com/gitsoufiane/mobile-simulator-emulator-mcp.git
+cd mobile-simulator-emulator-mcp
 npm ci --ignore-scripts
-npm run check
-npm run live # requires one booted iOS Simulator and Android Emulator
+npm run build
 ```
 
-The first iOS UI interaction builds and launches WebDriverAgent through Xcode. This can take several minutes. Later calls reuse that process until the MCP server exits or another iOS Simulator is selected.
+Start the devices you want the agent to use:
 
-## Agent configuration
+```bash
+# iOS: boot a Simulator from Xcode or the command line
+open -a Simulator
 
-Build first, then point the MCP client at the absolute path to `dist/src/index.js`:
+# Android: list and start an installed AVD
+emulator -list-avds
+emulator -avd <AVD_NAME>
+```
+
+Then verify both native toolchains:
+
+```bash
+xcrun simctl list devices
+adb devices -l
+npm run live
+```
+
+The first iOS UI interaction builds and launches WebDriverAgent through Xcode. It can take several minutes. Later calls reuse that process until the MCP server exits or another iOS Simulator is selected.
+
+## Configure an MCP client
+
+Any MCP client that supports local stdio servers can run this server. Build first, then add the following server definition to the client's MCP configuration, replacing both absolute paths:
 
 ```json
 {
   "mcpServers": {
     "mobile": {
       "command": "node",
-      "args": ["/absolute/path/to/mobileMcp/dist/src/index.js"],
+      "args": [
+        "/absolute/path/to/mobile-simulator-emulator-mcp/dist/src/index.js"
+      ],
       "env": {
-        "MOBILE_MCP_APP_ROOT": "/absolute/path/to/your/mobile/app"
+        "MOBILE_MCP_APP_ROOT": "/absolute/path/to/your/mobile/project"
       }
     }
   }
 }
 ```
 
-The server writes protocol messages only to stdout. Diagnostics and WebDriverAgent logs go to stderr.
+Restart the MCP client after changing its configuration. The first calls should be:
+
+1. `mobile_doctor` with `{}`.
+2. `mobile_list_devices` with `{}`.
+3. Use the returned `ios:...`, `android:...`, or `android-avd:...` ID in later calls.
+
+`MOBILE_MCP_APP_ROOT` limits which `.app` and `.apk` artifacts may be installed. Set it to the mobile project or build-output directory, not the repository root unless your artifacts are stored there.
+
+The server writes MCP protocol messages only to stdout. Diagnostics and WebDriverAgent logs go to stderr.
 
 ## Recommended agent workflow
 
@@ -66,6 +98,19 @@ The server writes protocol messages only to stdout. Diagnostics and WebDriverAge
 7. Interact with `mobile_tap`, `mobile_swipe`, `mobile_type_text`, and `mobile_press_key`.
 8. Re-read the UI tree or screenshot after each state-changing action.
 9. Collect `mobile_get_logs` when a workflow fails. Use `mobile_reset_app` only when a clean app state is required.
+
+## Example requests
+
+Once connected, an agent can handle requests such as:
+
+- “List my available simulators and emulators, then boot the shutdown iPhone.”
+- “Install the Android debug APK, launch it, and take a screenshot.”
+- “Open `myapp://checkout/123`, inspect the UI tree, and tap Continue.”
+- “Set the emulator location to San Francisco and test the nearby-results screen.”
+- “Collect the last five minutes of logs for `com.example.app`.”
+- “Reset the test app, grant location permission, and rerun the onboarding flow.”
+
+Destructive tools run without an extra MCP-side confirmation. Configure this server only for trusted agents and disposable simulator/emulator data.
 
 ## Tools
 
@@ -143,6 +188,28 @@ Treat this server like any local developer tool: it runs with the MCP client's o
 - Apple exposes no supported `simctl` command for network conditioning or Face ID/Touch ID events; those remain out of scope.
 - Video recording remains out of scope because it requires a long-running stream lifecycle and artifact storage policy.
 - Simulators and emulators do not reproduce all real-device sensors, performance, or hardware behavior.
+
+## Troubleshooting
+
+### `mobile_doctor` reports a missing Android command
+
+Set `ANDROID_SDK_ROOT` or `ANDROID_HOME` to the Android SDK directory and ensure its `platform-tools` and `emulator` directories are installed. You can also add both directories to `PATH`.
+
+### iOS UI calls time out on first use
+
+WebDriverAgent may need several minutes to compile through Xcode. Set `MOBILE_MCP_SHOW_XCODE_LOG=1` in the MCP environment to send detailed build logs to stderr.
+
+### App installation is rejected
+
+The artifact must resolve beneath `MOBILE_MCP_APP_ROOT`. Android requires an `.apk` file; iOS requires a built `.app` directory for the Simulator architecture.
+
+### A deep link scheme is rejected
+
+`http` and `https` are enabled by default. Add custom schemes as a comma-separated environment value, for example `MOBILE_MCP_URL_SCHEMES=myapp,example-beta`.
+
+### A device ID is rejected
+
+Call `mobile_list_devices` again and use its exact current ID. Physical Android and Apple devices are intentionally unsupported.
 
 ## Development and release checks
 
