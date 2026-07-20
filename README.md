@@ -59,7 +59,7 @@ The first iOS UI interaction builds and launches WebDriverAgent through Xcode. I
 
 ## Configure an MCP client
 
-Any MCP client that supports local stdio servers can run this server. Build first, then add the following server definition to the client's MCP configuration, replacing both absolute paths:
+Any MCP client that supports local stdio servers can run this server. Build first, then add the following server definition to the client's MCP configuration, replacing the absolute path:
 
 ```json
 {
@@ -68,10 +68,7 @@ Any MCP client that supports local stdio servers can run this server. Build firs
       "command": "node",
       "args": [
         "/absolute/path/to/mobile-simulator-emulator-mcp/dist/src/index.js"
-      ],
-      "env": {
-        "MOBILE_MCP_APP_ROOT": "/absolute/path/to/your/mobile/project"
-      }
+      ]
     }
   }
 }
@@ -83,7 +80,9 @@ Restart the MCP client after changing its configuration. The first calls should 
 2. `mobile_list_devices` with `{}`.
 3. Use the returned `ios:...`, `android:...`, or `android-avd:...` ID in later calls.
 
-`MOBILE_MCP_APP_ROOT` limits which `.app` and `.apk` artifacts may be installed. Set it to the mobile project or build-output directory, not the repository root unless your artifacts are stored there.
+By default, `.app` and `.apk` installation paths are resolved beneath the MCP process working directory. Clients that launch the server from the active agent project—such as Pi's MCP adapter when no `cwd` is configured—therefore need no extra environment setting.
+
+If another MCP client starts the server from a fixed directory, set that client's `cwd` to the mobile project. `MOBILE_MCP_APP_ROOT` remains available as an optional explicit override.
 
 The server writes MCP protocol messages only to stdout. Diagnostics and WebDriverAgent logs go to stderr.
 
@@ -120,7 +119,7 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | `mobile_list_devices` | List iOS Simulators, running Android Emulators, and configured AVDs |
 | `mobile_boot_device` | Boot and wait for an iOS Simulator or Android AVD |
 | `mobile_shutdown_device` | Shut down a running target without deleting data |
-| `mobile_install_app` | Install `.app` or `.apk` artifacts under `MOBILE_MCP_APP_ROOT` |
+| `mobile_install_app` | Install `.app` or `.apk` artifacts from the active project root |
 | `mobile_launch_app` | Launch an app by bundle/package ID |
 | `mobile_terminate_app` | Stop an app without clearing data |
 | `mobile_get_logs` | Return bounded logs for one installed app |
@@ -201,7 +200,7 @@ WebDriverAgent may need several minutes to compile through Xcode. Set `MOBILE_MC
 
 ### App installation is rejected
 
-The artifact must resolve beneath `MOBILE_MCP_APP_ROOT`. Android requires an `.apk` file; iOS requires a built `.app` directory for the Simulator architecture.
+The artifact must resolve beneath the agent project's working directory, or beneath `MOBILE_MCP_APP_ROOT` when explicitly configured. Android requires an `.apk` file; iOS requires a built `.app` directory for the Simulator architecture.
 
 ### A deep link scheme is rejected
 
