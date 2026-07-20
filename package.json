@@ -1,0 +1,39 @@
+{
+  "name": "local-mobile-mcp-server",
+  "version": "0.2.0",
+  "description": "Local MCP server for controlling iOS Simulators and Android Emulators",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "mobile-mcp-server": "dist/src/index.js"
+  },
+  "files": [
+    "dist/src",
+    "README.md",
+    "LICENSE"
+  ],
+  "engines": {
+    "node": ">=24"
+  },
+  "os": [
+    "darwin"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && chmod +x dist/src/index.js",
+    "start": "node dist/src/index.js",
+    "test": "node --test dist/test/*.test.js",
+    "check": "npm run build && npm test",
+    "live": "node dist/test/live-smoke.js",
+    "live:deep": "node dist/test/live-manipulation.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "appium-webdriveragent": "15.1.6",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/node": "24.13.3",
+    "typescript": "6.0.3"
+  },
+  "license": "MIT"
+}
