@@ -16,6 +16,7 @@ import {
 	parseOnlineDevice,
 	validateAppIdentifier,
 	validateAppPath,
+	validateMediaPath,
 	validatePermission,
 	validatePushPayload,
 	validateUrl,
@@ -108,6 +109,42 @@ test("quotes Android remote-shell arguments without command injection", () => {
 		() => quoteAndroidShellArgument("bad\ncommand"),
 		/control characters/u,
 	);
+});
+
+test("confines media paths and allows only media extensions", async () => {
+	const base = await mkdtemp(join(tmpdir(), "mobile-mcp-media-"));
+	const root = join(base, "root");
+	const photo = join(root, "shot.PNG");
+	const script = join(root, "payload.sh");
+	const outside = join(base, "outside.png");
+	const escape = join(root, "escape.png");
+	const previousRoot = process.env.MOBILE_MCP_APP_ROOT;
+	try {
+		await mkdir(root);
+		await mkdir(join(root, "album"));
+		await Promise.all([
+			writeFile(photo, "png"),
+			writeFile(script, "#!/bin/sh"),
+			writeFile(outside, "png"),
+		]);
+		await symlink(outside, escape);
+		process.env.MOBILE_MCP_APP_ROOT = root;
+
+		// Extension matching is case-insensitive.
+		assert.equal(await validateMediaPath("shot.PNG"), await realpath(photo));
+		await assert.rejects(() => validateMediaPath("payload.sh"), /must use one of/u);
+		await assert.rejects(() => validateMediaPath("escape.png"), /beneath/u);
+		await assert.rejects(
+			() => validateMediaPath("album"),
+			/must point to a file/u,
+		);
+		// The root itself is rejected before the file check.
+		await assert.rejects(() => validateMediaPath("."), /beneath/u);
+	} finally {
+		if (previousRoot === undefined) delete process.env.MOBILE_MCP_APP_ROOT;
+		else process.env.MOBILE_MCP_APP_ROOT = previousRoot;
+		await rm(base, { recursive: true, force: true });
+	}
 });
 
 test("confines app paths after resolving symlinks", async () => {

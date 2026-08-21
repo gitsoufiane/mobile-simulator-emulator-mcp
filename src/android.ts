@@ -1,7 +1,8 @@
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { run, runBinary, sleep } from "./exec.js";
+import type { MobileApp } from "./ios.js";
 
 export interface AndroidDevice {
 	id: string;
@@ -12,22 +13,27 @@ export interface AndroidDevice {
 	avd?: string;
 }
 
-export type AndroidKey =
-	| "HOME"
-	| "BACK"
-	| "ENTER"
-	| "APP_SWITCH"
-	| "VOLUME_UP"
-	| "VOLUME_DOWN";
-
-const KEYCODES: Record<AndroidKey, string> = {
+export const KEYCODES = {
 	HOME: "KEYCODE_HOME",
 	BACK: "KEYCODE_BACK",
 	ENTER: "KEYCODE_ENTER",
 	APP_SWITCH: "KEYCODE_APP_SWITCH",
 	VOLUME_UP: "KEYCODE_VOLUME_UP",
 	VOLUME_DOWN: "KEYCODE_VOLUME_DOWN",
-};
+	DELETE: "KEYCODE_DEL",
+	TAB: "KEYCODE_TAB",
+	ESCAPE: "KEYCODE_ESCAPE",
+	MENU: "KEYCODE_MENU",
+	SEARCH: "KEYCODE_SEARCH",
+	POWER: "KEYCODE_POWER",
+	DPAD_UP: "KEYCODE_DPAD_UP",
+	DPAD_DOWN: "KEYCODE_DPAD_DOWN",
+	DPAD_LEFT: "KEYCODE_DPAD_LEFT",
+	DPAD_RIGHT: "KEYCODE_DPAD_RIGHT",
+	DPAD_CENTER: "KEYCODE_DPAD_CENTER",
+} as const satisfies Record<string, string>;
+
+export type AndroidKey = keyof typeof KEYCODES;
 
 function sdkBinary(relativePath: string, fallback: string): string {
 	const sdk = process.env.ANDROID_SDK_ROOT ?? process.env.ANDROID_HOME;
@@ -43,6 +49,71 @@ export function quoteAndroidShellArgument(value: string): string {
 			"Android shell arguments cannot contain control characters",
 		);
 	return `'${value.replaceAll("'", `'\\''`)}'`;
+}
+
+export function parseAndroidPackages(stdout: string): string[] {
+	return stdout
+		.split(/\r?\n/u)
+		.flatMap((line) => {
+			const name = line.trim().startsWith("package:")
+				? line.trim().slice("package:".length).trim()
+				: "";
+			return name ? [name] : [];
+		})
+		.sort((left, right) => left.localeCompare(right));
+}
+
+/**
+ * `mCurrentFocus` is authoritative when a window has focus, but it reads
+ * `null` while the device is locked or animating, so `mFocusedApp` is the
+ * documented fallback for the activity that owns the foreground task.
+ */
+export function parseAndroidForegroundApp(stdout: string): {
+	appId: string;
+	activity?: string;
+} {
+	const focus =
+		/mCurrentFocus=Window\{[^}]*?\s([A-Za-z0-9_.]+)\/([A-Za-z0-9_.$]+)\}/u.exec(
+			stdout,
+		) ??
+		/mFocusedApp=ActivityRecord\{[^}]*?\s([A-Za-z0-9_.]+)\/([A-Za-z0-9_.$]+)[\s}]/u.exec(
+			stdout,
+		);
+	if (!focus?.[1])
+		throw new Error("Could not read a foreground app from dumpsys window");
+	return { appId: focus[1], ...(focus[2] ? { activity: focus[2] } : {}) };
+}
+
+/**
+ * `uiautomator dump` and `adb exec-out cat` both exit 0 on failure, so their
+ * output is the only signal that a dump actually happened. Without these
+ * checks a "No such file" message is returned as if it were the UI tree.
+ */
+export function validateAndroidUiTree(
+	dump: string,
+	tree: string,
+	remotePath: string,
+): string {
+	if (!dump.includes(remotePath)) {
+		throw new Error(
+			`uiautomator could not dump the UI (is the screen on and unlocked?): ${dump.trim() || "no output"}`,
+		);
+	}
+	if (!tree.includes("<hierarchy")) {
+		throw new Error(
+			`Android returned no UI hierarchy: ${tree.trim().slice(0, 200) || "empty output"}`,
+		);
+	}
+	return tree;
+}
+
+function safeMediaName(path: string): string {
+	const name = basename(path);
+	if (!/^[A-Za-z0-9._-]{1,128}$/u.test(name))
+		throw new Error(
+			`Media file name must be 1-128 characters of A-Z a-z 0-9 . _ - : ${name}`,
+		);
+	return name;
 }
 
 export class AndroidController {
@@ -372,8 +443,148 @@ export class AndroidController {
 		await this.command(serial, ["emu", "network", "delay", delay]);
 	}
 
+	async setConnectivity(
+		serial: string,
+		target: "airplane" | "wifi" | "data",
+		enabled: boolean,
+	): Promise<void> {
+		if (target === "airplane")
+			// cmd connectivity airplane-mode: API 30+; "enable" = radios off.
+			await this.command(serial, [
+				"shell",
+				"cmd",
+				"connectivity",
+				"airplane-mode",
+				enabled ? "enable" : "disable",
+			]);
+		else
+			await this.command(serial, [
+				"shell",
+				"svc",
+				target,
+				enabled ? "enable" : "disable",
+			]);
+	}
+
 	async rotate(serial: string): Promise<void> {
 		await this.command(serial, ["emu", "rotate"]);
+	}
+
+	async listApps(serial: string, includeSystem: boolean): Promise<MobileApp[]> {
+		const listing = async (flag: string): Promise<string[]> =>
+			parseAndroidPackages(
+				(
+					await this.command(
+						serial,
+						["shell", "pm", "list", "packages", flag],
+						30_000,
+						4 * 1024 * 1024,
+					)
+				).stdout,
+			);
+		const user = await listing("-3");
+		const system = includeSystem ? await listing("-s") : [];
+		return [
+			...user.map((appId) => ({ appId, name: appId, system: false })),
+			...system.map((appId) => ({ appId, name: appId, system: true })),
+		].sort((left, right) => left.appId.localeCompare(right.appId));
+	}
+
+	async foregroundApp(
+		serial: string,
+	): Promise<{ appId: string; activity?: string }> {
+		const { stdout } = await this.command(
+			serial,
+			["shell", "dumpsys", "window"],
+			20_000,
+			8 * 1024 * 1024,
+		);
+		return parseAndroidForegroundApp(stdout);
+	}
+
+	async getAppearance(serial: string): Promise<"light" | "dark"> {
+		const { stdout } = await this.command(serial, [
+			"shell",
+			"cmd",
+			"uimode",
+			"night",
+		]);
+		return /:\s*(yes|true)/iu.test(stdout) ? "dark" : "light";
+	}
+
+	async setAppearance(serial: string, mode: "light" | "dark"): Promise<void> {
+		await this.command(serial, [
+			"shell",
+			"cmd",
+			"uimode",
+			"night",
+			mode === "dark" ? "yes" : "no",
+		]);
+	}
+
+	async setFontScale(serial: string, scale: number): Promise<void> {
+		await this.command(serial, [
+			"shell",
+			"settings",
+			"put",
+			"system",
+			"font_scale",
+			String(scale),
+		]);
+	}
+
+	async addMedia(serial: string, paths: readonly string[]): Promise<void> {
+		for (const path of paths) {
+			const remote = `/sdcard/Pictures/${safeMediaName(path)}`;
+			await this.command(serial, ["push", path, remote], 120_000);
+			await this.command(serial, [
+				"shell",
+				"am",
+				"broadcast",
+				"-a",
+				"android.intent.action.MEDIA_SCANNER_SCAN_FILE",
+				"-d",
+				quoteAndroidShellArgument(`file://${remote}`),
+			]);
+		}
+	}
+
+	async screenInfo(serial: string): Promise<{
+		width: number;
+		height: number;
+		density?: number;
+		orientation: "portrait" | "landscape";
+	}> {
+		const { width, height } = await this.screenSize(serial);
+		const { stdout } = await this.command(serial, ["shell", "wm", "density"]);
+		const density = /density:\s*(\d+)/u.exec(stdout)?.[1];
+		return {
+			width,
+			height,
+			...(density ? { density: Number(density) } : {}),
+			orientation: height >= width ? "portrait" : "landscape",
+		};
+	}
+
+	async longPress(
+		serial: string,
+		x: number,
+		y: number,
+		durationMs: number,
+	): Promise<void> {
+		await this.validatePoint(serial, x, y);
+		// `input swipe` with identical start/end points is the documented
+		// long-press primitive; `input tap` has no duration argument.
+		await this.command(serial, [
+			"shell",
+			"input",
+			"swipe",
+			String(x),
+			String(y),
+			String(x),
+			String(y),
+			String(durationMs),
+		]);
 	}
 
 	async openUrl(serial: string, url: string): Promise<void> {
@@ -399,19 +610,18 @@ export class AndroidController {
 	async uiTree(serial: string): Promise<string> {
 		const remotePath = "/sdcard/mobile-mcp-ui.xml";
 		try {
-			await this.command(
+			const { stdout: dump } = await this.command(
 				serial,
 				["shell", "uiautomator", "dump", "--compressed", remotePath],
 				15_000,
 			);
-			return (
-				await this.command(
-					serial,
-					["exec-out", "cat", remotePath],
-					10_000,
-					8 * 1024 * 1024,
-				)
-			).stdout;
+			const { stdout: tree } = await this.command(
+				serial,
+				["exec-out", "cat", remotePath],
+				10_000,
+				8 * 1024 * 1024,
+			);
+			return validateAndroidUiTree(dump, tree, remotePath);
 		} finally {
 			// safe to ignore: remote temp cleanup must not hide the UI-tree result.
 			await this.command(

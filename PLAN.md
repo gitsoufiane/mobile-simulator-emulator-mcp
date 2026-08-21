@@ -2,7 +2,7 @@
 
 ## Goal
 
-Build a local, stdio-only MCP server that lets an agent discover and control Apple iOS Simulators and Google Android Emulators for app testing.
+Build a local MCP server that lets an agent discover and control Apple iOS Simulators and Google Android Emulators for app testing. stdio is the default transport; `--listen` adds a loopback-only Streamable HTTP listener.
 
 ## Decisions
 
@@ -44,11 +44,21 @@ Build a local, stdio-only MCP server that lets an agent discover and control App
 27. `mobile_fingerprint`
 28. `mobile_set_network`
 29. `mobile_rotate`
+30. `mobile_set_connectivity`
+31. `mobile_list_apps`
+32. `mobile_get_foreground_app`
+33. `mobile_get_screen_info`
+34. `mobile_long_press`
+35. `mobile_set_appearance`
+36. `mobile_set_accessibility`
+37. `mobile_add_media`
+38. `mobile_set_orientation`
 
 ## Safety boundaries
 
-- stdio transport only; no listening MCP HTTP server.
+- stdio by default; `--listen` binds Streamable HTTP to `127.0.0.1` only, with no remote listener and the same trust model as stdio.
 - Per-command timeouts and output caps.
+- Media and app install paths are confined beneath `MOBILE_MCP_APP_ROOT` by one shared resolver, with an extension allowlist for media.
 - Strict identifiers, coordinates, durations, URL schemes, and local app paths.
 - Every Android command targets an explicit emulator serial with `adb -s`.
 - Only `http`, `https`, or explicitly configured deep-link schemes may be opened.
@@ -57,6 +67,9 @@ Build a local, stdio-only MCP server that lets an agent discover and control App
 - App reset/uninstall and iOS Simulator erase are supported. Android online AVD wipe, device creation/deletion, real devices, video recording, and device farms are out of scope.
 - Raw ADB/simctl argument passthrough remains forbidden.
 - iOS network conditioning and biometric events remain out of scope because Apple provides no supported `simctl` command for them.
+- Simulator keychain, app-container paths, iCloud sync, and device create/clone/delete/rename remain out of scope: they leak host paths or manage fleets rather than drive a running device.
+- MCP resources, prompts, and completions remain unimplemented; device state is too volatile to cache as a resource and every workflow maps cleanly to a tool call.
+- Native commands that exit 0 on failure (`uiautomator dump`, `adb exec-out cat`, `xcrun simctl spawn log show`) must have their output validated, never returned verbatim as a result.
 
 ## Build order
 
@@ -70,6 +83,9 @@ Build a local, stdio-only MCP server that lets an agent discover and control App
 ## Release gates
 
 - `npm run check` passes (TypeScript + Node test runner).
+- Every tool except `mobile_take_screenshot` advertises an `outputSchema`; the SDK validates `structuredContent` against it on every call.
+- The server advertises `instructions` describing the doctor -> list -> act sequence.
+- `npm run live:tools` passes against a booted emulator for app discovery, appearance, accessibility, screen info, and long press.
 - MCP in-memory test covers tool listing, a valid call, and schema rejection.
 - Injection/path/scheme validation tests pass.
 - Live Android checks list `emulator-5554`, capture a PNG, and read UI XML.

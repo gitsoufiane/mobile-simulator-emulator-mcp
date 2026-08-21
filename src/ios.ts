@@ -23,6 +23,41 @@ export interface IosDevice {
 	version: string;
 }
 
+/** Cross-platform installed-app record shared with the Android controller. */
+export interface MobileApp {
+	appId: string;
+	name: string;
+	system: boolean;
+}
+
+export function parseIosApps(
+	json: string,
+	includeSystem: boolean,
+): MobileApp[] {
+	let parsed: Record<string, Record<string, unknown>>;
+	try {
+		parsed = JSON.parse(json) as Record<string, Record<string, unknown>>;
+	} catch (error) {
+		throw new Error(
+			`simctl listapps returned invalid JSON: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	return Object.entries(parsed)
+		.flatMap(([appId, info]) => {
+			const system = info.ApplicationType !== "User";
+			if (system && !includeSystem) return [];
+			const display = info.CFBundleDisplayName ?? info.CFBundleName;
+			return [
+				{
+					appId,
+					name: typeof display === "string" && display ? display : appId,
+					system,
+				},
+			];
+		})
+		.sort((left, right) => left.appId.localeCompare(right.appId));
+}
+
 export function isAlreadyTerminated(error: unknown): boolean {
 	return (
 		error instanceof CommandError &&
@@ -165,9 +200,52 @@ export class IosController {
 				executable,
 			],
 			30_000,
-			4 * 1024 * 1024,
+			// `--last 60m` on a chatty process (e.g. CFNetwork debug spam) can
+			// produce well over the previous 4 MB cap before it's sliced down
+			// to maxLines below, so simctl gets killed for exceeding maxBuffer.
+			32 * 1024 * 1024,
 		);
 		return stdout.split(/\r?\n/u).slice(-maxLines).join("\n");
+	}
+
+	async listApps(udid: string, includeSystem: boolean): Promise<MobileApp[]> {
+		const { stdout } = await this.simctl(
+			["listapps", udid],
+			30_000,
+			16 * 1024 * 1024,
+		);
+		// simctl emits an old-style plist; plutil is Apple's supported converter.
+		const { stdout: json } = await run(
+			"plutil",
+			["-convert", "json", "-o", "-", "-"],
+			{ input: stdout, maxBuffer: 16 * 1024 * 1024 },
+		);
+		return parseIosApps(json, includeSystem);
+	}
+
+	async getAppearance(udid: string): Promise<string> {
+		return (await this.simctl(["ui", udid, "appearance"])).stdout.trim();
+	}
+
+	async setAppearance(udid: string, mode: "light" | "dark"): Promise<void> {
+		await this.simctl(["ui", udid, "appearance", mode]);
+	}
+
+	async setContentSize(udid: string, size: string): Promise<void> {
+		await this.simctl(["ui", udid, "content_size", size]);
+	}
+
+	async setIncreaseContrast(udid: string, enabled: boolean): Promise<void> {
+		await this.simctl([
+			"ui",
+			udid,
+			"increase_contrast",
+			enabled ? "enabled" : "disabled",
+		]);
+	}
+
+	async addMedia(udid: string, paths: readonly string[]): Promise<void> {
+		await this.simctl(["addmedia", udid, ...paths], 120_000);
 	}
 
 	async setPermission(

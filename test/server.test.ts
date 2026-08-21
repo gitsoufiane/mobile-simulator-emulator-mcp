@@ -26,7 +26,7 @@ after(async () => {
 test("lists the focused mobile tool surface", async () => {
 	const result = await client.listTools();
 	const names = result.tools.map((tool) => tool.name);
-	assert.equal(names.length, 29);
+	assert.equal(names.length, 38);
 	assert.deepEqual(names, [
 		"mobile_doctor",
 		"mobile_list_devices",
@@ -35,25 +35,34 @@ test("lists the focused mobile tool surface", async () => {
 		"mobile_install_app",
 		"mobile_launch_app",
 		"mobile_terminate_app",
+		"mobile_list_apps",
+		"mobile_get_foreground_app",
 		"mobile_get_logs",
 		"mobile_reset_app",
 		"mobile_set_permission",
 		"mobile_set_location",
 		"mobile_send_push",
+		"mobile_add_media",
 		"mobile_uninstall_app",
 		"mobile_erase_device",
 		"mobile_set_clipboard",
 		"mobile_get_clipboard",
 		"mobile_set_status_bar",
+		"mobile_set_appearance",
+		"mobile_set_accessibility",
 		"mobile_set_battery",
 		"mobile_send_sms",
 		"mobile_fingerprint",
 		"mobile_set_network",
+		"mobile_set_connectivity",
 		"mobile_rotate",
+		"mobile_set_orientation",
 		"mobile_open_url",
 		"mobile_take_screenshot",
 		"mobile_get_ui_tree",
+		"mobile_get_screen_info",
 		"mobile_tap",
+		"mobile_long_press",
 		"mobile_swipe",
 		"mobile_type_text",
 		"mobile_press_key",
@@ -69,25 +78,24 @@ test("lists the focused mobile tool surface", async () => {
 			true,
 		);
 	}
-	for (const name of [
-		"mobile_get_logs",
-		"mobile_reset_app",
-		"mobile_set_permission",
-		"mobile_set_location",
-		"mobile_send_push",
-		"mobile_uninstall_app",
-		"mobile_erase_device",
-		"mobile_set_clipboard",
-		"mobile_get_clipboard",
-		"mobile_set_status_bar",
-		"mobile_set_battery",
-		"mobile_send_sms",
-		"mobile_fingerprint",
-		"mobile_set_network",
-		"mobile_rotate",
-	]) {
-		assert.ok(result.tools.find((tool) => tool.name === name)?.outputSchema);
+	// Every tool except the image-only screenshot returns structuredContent,
+	// so each one must advertise an output schema for clients to validate.
+	for (const tool of result.tools) {
+		if (tool.name === "mobile_take_screenshot") continue;
+		assert.ok(tool.outputSchema, `${tool.name} is missing an outputSchema`);
 	}
+	assert.equal(
+		result.tools.find((tool) => tool.name === "mobile_take_screenshot")
+			?.outputSchema,
+		undefined,
+	);
+});
+
+test("advertises server instructions for agent onboarding", () => {
+	const instructions = client.getInstructions();
+	assert.match(String(instructions), /mobile_doctor/u);
+	assert.match(String(instructions), /mobile_list_devices/u);
+	assert.match(String(instructions), /WebDriverAgent/u);
 });
 
 test("returns structured data for a valid call", async () => {

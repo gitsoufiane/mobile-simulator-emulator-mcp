@@ -51,7 +51,13 @@ function runFile(
 				const textErr = Buffer.isBuffer(stderr)
 					? stderr.toString("utf8")
 					: stderr;
-				const detail = textErr.trim() || textOut.trim() || error.message;
+				// xcrun/simctl print this harmless directory-services warning on
+				// stderr even when the real failure is a timeout or maxBuffer
+				// overrun; stripping it stops it from masking the actual cause.
+				const meaningfulErr = textErr
+					.replaceAll(/^getpwuid_r did not find a match for uid \d+$/gmu, "")
+					.trim();
+				const detail = meaningfulErr || error.message || textOut.trim();
 				reject(
 					new CommandError(
 						`${command} failed: ${detail}`,

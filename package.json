@@ -1,6 +1,6 @@
 {
   "name": "local-mobile-mcp-server",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "description": "Local MCP server for controlling iOS Simulators and Android Emulators",
   "type": "module",
   "private": true,
@@ -24,7 +24,8 @@
     "test": "node --test dist/test/*.test.js",
     "check": "npm run build && npm test",
     "live": "node dist/test/live-smoke.js",
-    "live:deep": "node dist/test/live-manipulation.js"
+    "live:deep": "node dist/test/live-manipulation.js",
+    "live:tools": "node dist/test/live-tools.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.29.0",

@@ -1,14 +1,23 @@
 import { realpath, stat } from "node:fs/promises";
-import { relative, resolve } from "node:path";
+import { extname, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { AndroidController, type AndroidKey } from "./android.js";
+import { AndroidController, type AndroidKey, KEYCODES } from "./android.js";
 import { run } from "./exec.js";
 import { IosController } from "./ios.js";
 import { WdaController } from "./wda.js";
 
-const VERSION = "0.2.0";
+const VERSION = "0.3.0";
+const INSTRUCTIONS = `Controls local iOS Simulators and Android Emulators for app testing. Physical devices are rejected.
+
+Call mobile_doctor first, then mobile_list_devices, and reuse the exact returned ID (ios:<UDID>, android:emulator-5554, or android-avd:<name>) in every later call.
+Discover app identifiers with mobile_list_apps instead of guessing bundle IDs or package names.
+Read the screen before acting: mobile_get_ui_tree or mobile_take_screenshot for coordinates, then mobile_tap, mobile_long_press, mobile_swipe, or mobile_type_text. Re-read after every state-changing action.
+
+The first iOS UI call builds and launches WebDriverAgent through Xcode and can take several minutes; later iOS calls reuse that process.
+Destructive tools (install, uninstall, reset, erase, permission changes) run without extra confirmation, so target only disposable app and device state.
+Platform coverage differs: clipboard, push, status bar, accessibility sizing, and mobile_set_orientation are iOS-only; SMS, fingerprint, battery, network profiles, connectivity, and mobile_rotate are Android-only. Each tool reports the unsupported platform in its error message.`;
 const TEXT_LIMIT = 1_000_000;
 const IOS_UUID =
 	/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/iu;
@@ -17,6 +26,39 @@ const AVD_NAME = /^[A-Za-z0-9._-]{1,100}$/u;
 const IOS_APP_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
 const ANDROID_APP_ID = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/u;
 const ANDROID_PERMISSION = /^[A-Za-z][A-Za-z0-9_.]{2,254}$/u;
+const MEDIA_EXTENSIONS = new Set([
+	".jpg",
+	".jpeg",
+	".png",
+	".heic",
+	".gif",
+	".mp4",
+	".mov",
+	".m4v",
+	".vcf",
+]);
+const IOS_ORIENTATIONS = {
+	portrait: "PORTRAIT",
+	landscape: "LANDSCAPE",
+	"landscape-right": "UIA_DEVICE_ORIENTATION_LANDSCAPERIGHT",
+	"portrait-upside-down": "UIA_DEVICE_ORIENTATION_PORTRAIT_UPSIDEDOWN",
+} as const;
+const IOS_CONTENT_SIZES = [
+	"extra-small",
+	"small",
+	"medium",
+	"large",
+	"extra-large",
+	"extra-extra-large",
+	"extra-extra-extra-large",
+	"accessibility-medium",
+	"accessibility-large",
+	"accessibility-extra-large",
+	"accessibility-extra-extra-large",
+	"accessibility-extra-extra-extra-large",
+	"increment",
+	"decrement",
+] as const;
 const IOS_PRIVACY_SERVICES = new Set([
 	"all",
 	"calendar",
@@ -127,10 +169,8 @@ export function validateUrl(value: string): string {
 	return url.href;
 }
 
-export async function validateAppPath(
-	platform: "ios" | "android",
-	value: string,
-): Promise<string> {
+/** Resolves a client-supplied path and confines it beneath the app root. */
+async function resolveBeneathRoot(value: string): Promise<string> {
 	const configuredRoot = resolve(
 		process.env.MOBILE_MCP_APP_ROOT ?? process.cwd(),
 	);
@@ -139,15 +179,33 @@ export async function validateAppPath(
 	});
 	const candidate = await realpath(resolve(root, value)).catch(() => {
 		throw new Error(
-			`App path does not exist beneath MOBILE_MCP_APP_ROOT: ${value}`,
+			`Path does not exist beneath MOBILE_MCP_APP_ROOT: ${value}`,
 		);
 	});
 	const pathFromRoot = relative(root, candidate);
 	if (pathFromRoot.startsWith("..") || pathFromRoot === "") {
+		throw new Error("Path must resolve beneath MOBILE_MCP_APP_ROOT");
+	}
+	return candidate;
+}
+
+export async function validateMediaPath(value: string): Promise<string> {
+	const candidate = await resolveBeneathRoot(value);
+	const info = await stat(candidate);
+	if (!info.isFile()) throw new Error("Media paths must point to a file");
+	if (!MEDIA_EXTENSIONS.has(extname(candidate).toLowerCase())) {
 		throw new Error(
-			"App path must point to an app beneath MOBILE_MCP_APP_ROOT",
+			`Media files must use one of: ${[...MEDIA_EXTENSIONS].join(", ")}`,
 		);
 	}
+	return candidate;
+}
+
+export async function validateAppPath(
+	platform: "ios" | "android",
+	value: string,
+): Promise<string> {
+	const candidate = await resolveBeneathRoot(value);
 	const info = await stat(candidate);
 	if (
 		platform === "android" &&
@@ -191,6 +249,11 @@ function safe<T>(
 	};
 }
 
+/** WDA reports PORTRAIT/LANDSCAPE/UIA_DEVICE_ORIENTATION_*; collapse to an axis. */
+function normalizeOrientation(value: string): "portrait" | "landscape" {
+	return value.toUpperCase().includes("LANDSCAPE") ? "landscape" : "portrait";
+}
+
 function truncate(value: string): { value: string; truncated: boolean } {
 	return value.length <= TEXT_LIMIT
 		? { value, truncated: false }
@@ -229,10 +292,10 @@ export function createMobileServer(options: ServerOptions = {}): {
 	const android = new AndroidController();
 	const ios = new IosController();
 	const wda = new WdaController();
-	const server = new McpServer({
-		name: "local-mobile-mcp-server",
-		version: VERSION,
-	});
+	const server = new McpServer(
+		{ name: "local-mobile-mcp-server", version: VERSION },
+		{ instructions: INSTRUCTIONS },
+	);
 
 	const doctor =
 		options.doctor ??
@@ -305,6 +368,20 @@ export function createMobileServer(options: ServerOptions = {}): {
 		.describe("Stable device ID returned by mobile_list_devices");
 	const appIdSchema = z.string().min(3).max(255);
 	const coordinate = z.number().int().min(0).max(100_000);
+	const platformSchema = z.enum(["ios", "android"]);
+	const deviceEntrySchema = z.object({
+		id: z.string(),
+		name: z.string(),
+		platform: platformSchema,
+		state: z.string(),
+		version: z.string().optional(),
+		avd: z.string().optional(),
+	});
+	const appEntrySchema = z.object({
+		appId: z.string(),
+		name: z.string(),
+		system: z.boolean(),
+	});
 
 	server.registerTool(
 		"mobile_doctor",
@@ -313,6 +390,9 @@ export function createMobileServer(options: ServerOptions = {}): {
 			description:
 				"Check local Apple and Android command-line tools, device counts, and WebDriverAgent state without changing devices.",
 			inputSchema: z.object({}).strict(),
+			// Loose: the report grows with the installed toolchain and a
+			// caller-supplied doctor may add its own diagnostic fields.
+			outputSchema: z.object({ ok: z.boolean() }).loose(),
 			annotations: {
 				readOnlyHint: true,
 				destructiveHint: false,
@@ -330,6 +410,10 @@ export function createMobileServer(options: ServerOptions = {}): {
 			description:
 				"List available iOS Simulators, running Android Emulators, and configured Android virtual devices. Physical devices are excluded.",
 			inputSchema: z.object({}).strict(),
+			outputSchema: z.object({
+				devices: z.array(deviceEntrySchema),
+				errors: z.record(z.string(), z.string()).optional(),
+			}),
 			annotations: {
 				readOnlyHint: true,
 				destructiveHint: false,
@@ -369,6 +453,11 @@ export function createMobileServer(options: ServerOptions = {}): {
 					timeoutSeconds: z.number().int().min(10).max(300).default(180),
 				})
 				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				state: z.literal("online"),
+				avd: z.string().optional(),
+			}),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: false,
@@ -398,6 +487,10 @@ export function createMobileServer(options: ServerOptions = {}): {
 			description:
 				"Shut down a running iOS Simulator or Android Emulator without deleting its data.",
 			inputSchema: z.object({ device: deviceSchema }).strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				state: z.literal("shutdown"),
+			}),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: false,
@@ -426,6 +519,10 @@ export function createMobileServer(options: ServerOptions = {}): {
 			inputSchema: z
 				.object({ device: deviceSchema, path: z.string().min(1).max(2_048) })
 				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				installed: z.boolean(),
+			}),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: true,
@@ -447,10 +544,15 @@ export function createMobileServer(options: ServerOptions = {}): {
 		{
 			title: "Launch Mobile App",
 			description:
-				"Launch an installed app by iOS bundle ID or Android package name.",
+				"Launch an installed app by iOS bundle ID or Android package name. Use mobile_list_apps to discover valid identifiers.",
 			inputSchema: z
 				.object({ device: deviceSchema, appId: appIdSchema })
 				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				appId: z.string(),
+				launched: z.boolean(),
+			}),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: false,
@@ -477,6 +579,11 @@ export function createMobileServer(options: ServerOptions = {}): {
 			inputSchema: z
 				.object({ device: deviceSchema, appId: appIdSchema })
 				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				appId: z.string(),
+				terminated: z.boolean(),
+			}),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: false,
@@ -491,6 +598,84 @@ export function createMobileServer(options: ServerOptions = {}): {
 				await ios.terminate(target.target, checkedAppId);
 			else await android.terminate(target.target, checkedAppId);
 			return jsonResult({ device, appId: checkedAppId, terminated: true });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_list_apps",
+		{
+			title: "List Installed Apps",
+			description:
+				"List installed apps with their iOS bundle IDs or Android package names. Returns user-installed apps unless includeSystem is true.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					includeSystem: z.boolean().default(false),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				platform: platformSchema,
+				apps: z.array(appEntrySchema),
+				count: z.number().int().nonnegative(),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, includeSystem }) => {
+			const target = parseOnlineDevice(device);
+			const apps =
+				target.platform === "ios"
+					? await ios.listApps(target.target, includeSystem)
+					: await android.listApps(target.target, includeSystem);
+			return jsonResult({
+				device,
+				platform: target.platform,
+				apps,
+				count: apps.length,
+			});
+		}),
+	);
+
+	server.registerTool(
+		"mobile_get_foreground_app",
+		{
+			title: "Get Foreground App",
+			description:
+				"Return the app currently in the foreground. Use it to confirm a launch or deep link landed on the expected app before interacting.",
+			inputSchema: z.object({ device: deviceSchema }).strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				platform: platformSchema,
+				appId: z.string(),
+				activity: z.string().optional(),
+				processId: z.number().int().optional(),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform === "ios") {
+				const version = await getBootedIosVersion(target.target);
+				const info = await wda.use(target.target, version, () =>
+					wda.activeAppInfo(),
+				);
+				return jsonResult({ device, platform: "ios", ...info });
+			}
+			return jsonResult({
+				device,
+				platform: "android",
+				...(await android.foregroundApp(target.target)),
+			});
 		}),
 	);
 
@@ -744,6 +929,39 @@ export function createMobileServer(options: ServerOptions = {}): {
 	);
 
 	server.registerTool(
+		"mobile_add_media",
+		{
+			title: "Add Media To Device Library",
+			description:
+				"Add photos, videos, or vCard contacts to the device library so photo-picker and import flows have test fixtures. Paths are confined beneath MOBILE_MCP_APP_ROOT.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					paths: z.array(z.string().min(1).max(2_048)).min(1).max(20),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				added: z.number().int().nonnegative(),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, paths }) => {
+			const target = parseOnlineDevice(device);
+			const resolved = await Promise.all(paths.map(validateMediaPath));
+			if (target.platform === "ios")
+				await ios.addMedia(target.target, resolved);
+			else await android.addMedia(target.target, resolved);
+			return jsonResult({ device, added: resolved.length });
+		}),
+	);
+
+	server.registerTool(
 		"mobile_uninstall_app",
 		{
 			title: "Uninstall Mobile App",
@@ -938,6 +1156,92 @@ export function createMobileServer(options: ServerOptions = {}): {
 	);
 
 	server.registerTool(
+		"mobile_set_appearance",
+		{
+			title: "Set Light Or Dark Appearance",
+			description:
+				"Switch the device between light and dark appearance to test both themes.",
+			inputSchema: z
+				.object({ device: deviceSchema, mode: z.enum(["light", "dark"]) })
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				platform: platformSchema,
+				mode: z.enum(["light", "dark"]),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, mode }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform === "ios")
+				await ios.setAppearance(target.target, mode);
+			else await android.setAppearance(target.target, mode);
+			return jsonResult({ device, platform: target.platform, mode });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_set_accessibility",
+		{
+			title: "Set Accessibility Text And Contrast",
+			description:
+				"Change accessibility display settings to test layouts. iOS accepts contentSize (Dynamic Type) and increaseContrast; Android accepts fontScale.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					contentSize: z.enum(IOS_CONTENT_SIZES).optional(),
+					increaseContrast: z.boolean().optional(),
+					fontScale: z.number().min(0.25).max(5).optional(),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				platform: platformSchema,
+				applied: z.array(z.string()),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, contentSize, increaseContrast, fontScale }) => {
+			const target = parseOnlineDevice(device);
+			const applied: string[] = [];
+			if (target.platform === "ios") {
+				if (fontScale !== undefined)
+					throw new Error("fontScale is Android-only; use contentSize on iOS");
+				if (contentSize !== undefined) {
+					await ios.setContentSize(target.target, contentSize);
+					applied.push("contentSize");
+				}
+				if (increaseContrast !== undefined) {
+					await ios.setIncreaseContrast(target.target, increaseContrast);
+					applied.push("increaseContrast");
+				}
+			} else {
+				if (contentSize !== undefined || increaseContrast !== undefined)
+					throw new Error(
+						"contentSize and increaseContrast are iOS-only; use fontScale on Android",
+					);
+				if (fontScale !== undefined) {
+					await android.setFontScale(target.target, fontScale);
+					applied.push("fontScale");
+				}
+			}
+			if (!applied.length)
+				throw new Error("Provide at least one accessibility setting to change");
+			return jsonResult({ device, platform: target.platform, applied });
+		}),
+	);
+
+	server.registerTool(
 		"mobile_set_battery",
 		{
 			title: "Set Android Emulator Battery",
@@ -1084,6 +1388,42 @@ export function createMobileServer(options: ServerOptions = {}): {
 	);
 
 	server.registerTool(
+		"mobile_set_connectivity",
+		{
+			title: "Set Android Emulator Connectivity",
+			description:
+				"Toggle an Android Emulator's airplane mode, wifi, or mobile data. iOS Simulators share the host network and are not supported.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					target: z.enum(["airplane", "wifi", "data"]),
+					enabled: z.boolean(),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				target: z.string(),
+				enabled: z.boolean(),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, target: connTarget, enabled }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform !== "android")
+				throw new Error(
+					"mobile_set_connectivity supports Android Emulators only",
+				);
+			await android.setConnectivity(target.target, connTarget, enabled);
+			return jsonResult({ device, target: connTarget, enabled });
+		}),
+	);
+
+	server.registerTool(
 		"mobile_rotate",
 		{
 			title: "Rotate Android Emulator",
@@ -1111,6 +1451,48 @@ export function createMobileServer(options: ServerOptions = {}): {
 	);
 
 	server.registerTool(
+		"mobile_set_orientation",
+		{
+			title: "Set iOS Simulator Orientation",
+			description:
+				"Set an absolute iOS Simulator orientation through WebDriverAgent. Use mobile_rotate for Android Emulators.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					orientation: z.enum(
+						Object.keys(IOS_ORIENTATIONS) as [
+							keyof typeof IOS_ORIENTATIONS,
+							...(keyof typeof IOS_ORIENTATIONS)[],
+						],
+					),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				orientation: z.string(),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, orientation }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform !== "ios")
+				throw new Error(
+					"mobile_set_orientation supports iOS Simulators only; use mobile_rotate on Android",
+				);
+			const version = await getBootedIosVersion(target.target);
+			await wda.use(target.target, version, () =>
+				wda.setOrientation(IOS_ORIENTATIONS[orientation]),
+			);
+			return jsonResult({ device, orientation });
+		}),
+	);
+
+	server.registerTool(
 		"mobile_open_url",
 		{
 			title: "Open Mobile URL",
@@ -1119,6 +1501,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 			inputSchema: z
 				.object({ device: deviceSchema, url: z.string().min(1).max(2_048) })
 				.strict(),
+			outputSchema: z.object({ device: z.string(), opened: z.string() }),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: true,
@@ -1184,6 +1567,12 @@ export function createMobileServer(options: ServerOptions = {}): {
 			description:
 				"Return the current native accessibility/UI hierarchy. If truncated is true, format ends in -fragment and tree is intentionally incomplete text.",
 			inputSchema: z.object({ device: deviceSchema }).strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				format: z.string(),
+				tree: z.string(),
+				truncated: z.boolean(),
+			}),
 			annotations: {
 				readOnlyHint: true,
 				destructiveHint: false,
@@ -1214,6 +1603,51 @@ export function createMobileServer(options: ServerOptions = {}): {
 	);
 
 	server.registerTool(
+		"mobile_get_screen_info",
+		{
+			title: "Get Screen Size And Orientation",
+			description:
+				"Return screen width, height, and orientation. Call it before tapping or swiping so coordinates match the current screen.",
+			inputSchema: z.object({ device: deviceSchema }).strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				platform: platformSchema,
+				width: z.number(),
+				height: z.number(),
+				orientation: z.enum(["portrait", "landscape"]),
+				density: z.number().optional(),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform === "ios") {
+				const version = await getBootedIosVersion(target.target);
+				const info = await wda.use(target.target, version, () =>
+					wda.screenInfo(),
+				);
+				return jsonResult({
+					device,
+					platform: "ios",
+					width: info.width,
+					height: info.height,
+					orientation: normalizeOrientation(info.orientation),
+				});
+			}
+			return jsonResult({
+				device,
+				platform: "android",
+				...(await android.screenInfo(target.target)),
+			});
+		}),
+	);
+
+	server.registerTool(
 		"mobile_tap",
 		{
 			title: "Tap Mobile Screen",
@@ -1222,6 +1656,10 @@ export function createMobileServer(options: ServerOptions = {}): {
 			inputSchema: z
 				.object({ device: deviceSchema, x: coordinate, y: coordinate })
 				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				tapped: z.object({ x: z.number().int(), y: z.number().int() }),
+			}),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: true,
@@ -1236,6 +1674,47 @@ export function createMobileServer(options: ServerOptions = {}): {
 				await wda.use(target.target, version, () => wda.tap(x, y));
 			} else await android.tap(target.target, x, y);
 			return jsonResult({ device, tapped: { x, y } });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_long_press",
+		{
+			title: "Long Press Mobile Screen",
+			description:
+				"Press and hold integer screen coordinates to trigger context menus, drag handles, or press-and-hold actions.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					x: coordinate,
+					y: coordinate,
+					durationMs: z.number().int().min(200).max(10_000).default(1_000),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				pressed: z.object({
+					x: z.number().int(),
+					y: z.number().int(),
+					durationMs: z.number().int(),
+				}),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, x, y, durationMs }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform === "ios") {
+				const version = await getBootedIosVersion(target.target);
+				await wda.use(target.target, version, () =>
+					wda.longPress(x, y, durationMs),
+				);
+			} else await android.longPress(target.target, x, y, durationMs);
+			return jsonResult({ device, pressed: { x, y, durationMs } });
 		}),
 	);
 
@@ -1255,6 +1734,16 @@ export function createMobileServer(options: ServerOptions = {}): {
 					durationMs: z.number().int().min(50).max(5_000).default(300),
 				})
 				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				swiped: z.object({
+					fromX: z.number().int(),
+					fromY: z.number().int(),
+					toX: z.number().int(),
+					toY: z.number().int(),
+					durationMs: z.number().int(),
+				}),
+			}),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: true,
@@ -1287,6 +1776,10 @@ export function createMobileServer(options: ServerOptions = {}): {
 			inputSchema: z
 				.object({ device: deviceSchema, text: z.string().max(2_000) })
 				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				typedCharacters: z.number().int().nonnegative(),
+			}),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: true,
@@ -1304,21 +1797,24 @@ export function createMobileServer(options: ServerOptions = {}): {
 		}),
 	);
 
-	const keySchema = z.enum([
+	// Derived from the Android keycode table so both stay in sync.
+	const keySchema = z.enum(
+		Object.keys(KEYCODES) as [AndroidKey, ...AndroidKey[]],
+	);
+	const IOS_KEYS = new Set([
 		"HOME",
-		"BACK",
 		"ENTER",
-		"APP_SWITCH",
+		"DELETE",
 		"VOLUME_UP",
 		"VOLUME_DOWN",
-	]);
+	] as const);
 	server.registerTool(
 		"mobile_press_key",
 		{
 			title: "Press Mobile Key",
-			description:
-				"Press a supported system key. BACK and APP_SWITCH are Android-only.",
+			description: `Press a supported system key. iOS supports ${[...IOS_KEYS].join(", ")}; every other key is Android-only.`,
 			inputSchema: z.object({ device: deviceSchema, key: keySchema }).strict(),
+			outputSchema: z.object({ device: z.string(), pressed: z.string() }),
 			annotations: {
 				readOnlyHint: false,
 				destructiveHint: true,
@@ -1329,11 +1825,14 @@ export function createMobileServer(options: ServerOptions = {}): {
 		safe(async ({ device, key }) => {
 			const target = parseOnlineDevice(device);
 			if (target.platform === "ios") {
-				if (key === "BACK" || key === "APP_SWITCH")
-					throw new Error(`${key} is Android-only`);
+				const iosKey = [...IOS_KEYS].find((candidate) => candidate === key);
+				if (!iosKey)
+					throw new Error(
+						`${key} is Android-only; iOS supports ${[...IOS_KEYS].join(", ")}`,
+					);
 				const version = await getBootedIosVersion(target.target);
-				await wda.use(target.target, version, () => wda.pressKey(key));
-			} else await android.pressKey(target.target, key as AndroidKey);
+				await wda.use(target.target, version, () => wda.pressKey(iosKey));
+			} else await android.pressKey(target.target, key);
 			return jsonResult({ device, pressed: key });
 		}),
 	);

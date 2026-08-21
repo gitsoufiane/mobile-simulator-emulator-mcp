@@ -174,6 +174,55 @@ export class WdaController {
 		return JSON.stringify(response.value);
 	}
 
+	async activeAppInfo(): Promise<{ appId: string; processId?: number }> {
+		const response = await this.request("/wda/activeAppInfo");
+		const info = object(response.value, "active app info");
+		if (typeof info.bundleId !== "string" || !info.bundleId)
+			throw new Error("WebDriverAgent did not return a foreground bundle ID");
+		return {
+			appId: info.bundleId,
+			...(typeof info.pid === "number" ? { processId: info.pid } : {}),
+		};
+	}
+
+	async getOrientation(): Promise<string> {
+		const { value } = await this.request("/orientation");
+		if (typeof value !== "string")
+			throw new Error("WebDriverAgent returned an invalid orientation");
+		return value;
+	}
+
+	async setOrientation(orientation: string): Promise<void> {
+		await this.withSession(async (sessionPath) => {
+			await this.request(`${sessionPath}/orientation`, {
+				method: "POST",
+				body: JSON.stringify({ orientation }),
+			});
+		});
+	}
+
+	async screenInfo(): Promise<{
+		width: number;
+		height: number;
+		orientation: string;
+	}> {
+		const size = await this.withSession((sessionPath) =>
+			this.screenSize(sessionPath),
+		);
+		return { ...size, orientation: await this.getOrientation() };
+	}
+
+	async longPress(x: number, y: number, durationMs: number): Promise<void> {
+		await this.withSession(async (sessionPath) => {
+			await this.validatePoint(sessionPath, x, y);
+			// WDA's touchAndHold duration is expressed in seconds.
+			await this.request(`${sessionPath}/wda/touchAndHold`, {
+				method: "POST",
+				body: JSON.stringify({ x, y, duration: durationMs / 1_000 }),
+			});
+		});
+	}
+
 	private async screenSize(
 		sessionPath: string,
 	): Promise<{ width: number; height: number }> {
@@ -267,10 +316,12 @@ export class WdaController {
 	}
 
 	async pressKey(
-		key: "HOME" | "ENTER" | "VOLUME_UP" | "VOLUME_DOWN",
+		key: "HOME" | "ENTER" | "DELETE" | "VOLUME_UP" | "VOLUME_DOWN",
 	): Promise<void> {
-		if (key === "ENTER") {
-			await this.typeText("\n");
+		// WDA exposes no hardware button for these; the keyboard endpoint is
+		// the supported way to deliver Return and Backspace.
+		if (key === "ENTER" || key === "DELETE") {
+			await this.typeText(key === "ENTER" ? "\n" : "\u0008");
 			return;
 		}
 		const names = {

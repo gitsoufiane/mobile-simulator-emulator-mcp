@@ -3,6 +3,7 @@ import { test } from "node:test";
 import { CommandError } from "../src/exec.js";
 import {
 	isAlreadyTerminated,
+	parseIosApps,
 	parseIosDevices,
 	parseIosExecutable,
 	type SimctlList,
@@ -29,6 +30,37 @@ test("reads an iOS app executable from simctl appinfo", () => {
 		"Example App",
 	);
 	assert.throws(() => parseIosExecutable("{}"), /CFBundleExecutable/u);
+});
+
+test("separates user apps from system apps in simctl listapps output", () => {
+	// Shape taken from `xcrun simctl listapps <udid> | plutil -convert json`.
+	const json = JSON.stringify({
+		"com.apple.Bridge": {
+			ApplicationType: "System",
+			CFBundleDisplayName: "Watch",
+		},
+		"com.inspiren.augi": {
+			ApplicationType: "User",
+			CFBundleDisplayName: "Inspiren",
+		},
+		"com.example.nameless": { ApplicationType: "User" },
+	});
+
+	assert.deepEqual(parseIosApps(json, false), [
+		{
+			appId: "com.example.nameless",
+			name: "com.example.nameless",
+			system: false,
+		},
+		{ appId: "com.inspiren.augi", name: "Inspiren", system: false },
+	]);
+	assert.equal(parseIosApps(json, true).length, 3);
+	assert.equal(
+		parseIosApps(json, true).find((app) => app.appId === "com.apple.Bridge")
+			?.system,
+		true,
+	);
+	assert.throws(() => parseIosApps("not json", false), /invalid JSON/u);
 });
 
 test("lists only available iOS simulator runtimes", () => {
