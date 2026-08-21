@@ -28,7 +28,7 @@
     "live:tools": "node dist/test/live-tools.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.29.0",
+    "@modelcontextprotocol/sdk": "1.30.0",
     "appium-webdriveragent": "15.1.6",
     "zod": "4.4.3"
   },

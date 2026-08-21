@@ -132,7 +132,10 @@ test("confines media paths and allows only media extensions", async () => {
 
 		// Extension matching is case-insensitive.
 		assert.equal(await validateMediaPath("shot.PNG"), await realpath(photo));
-		await assert.rejects(() => validateMediaPath("payload.sh"), /must use one of/u);
+		await assert.rejects(
+			() => validateMediaPath("payload.sh"),
+			/must use one of/u,
+		);
 		await assert.rejects(() => validateMediaPath("escape.png"), /beneath/u);
 		await assert.rejects(
 			() => validateMediaPath("album"),
