@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { basename, join } from "node:path";
-import { run, runBinary, sleep } from "./exec.js";
+import { run, runBinary, sleep, tailLines } from "./exec.js";
 import type { MobileApp } from "./ios.js";
 
 export interface AndroidDevice {
@@ -163,26 +163,31 @@ export class AndroidController {
 		}
 	}
 
+	private async osVersion(serial: string): Promise<string | undefined> {
+		try {
+			const { stdout } = await this.command(serial, [
+				"shell",
+				"getprop",
+				"ro.build.version.release",
+			]);
+			return stdout.trim() || undefined;
+		} catch {
+			// Optional metadata: device state remains authoritative.
+			return undefined;
+		}
+	}
+
 	async listDevices(): Promise<AndroidDevice[]> {
-		const attached = await this.rawDevices();
+		const [attached, avds] = await Promise.all([
+			this.rawDevices(),
+			this.listAvds(),
+		]);
 		const online = await Promise.all(
 			attached.map(async ({ serial, state, details }) => {
-				const avd = state === "device" ? await this.avdName(serial) : undefined;
-				let version: string | undefined;
-				if (state === "device") {
-					try {
-						version = (
-							await this.command(serial, [
-								"shell",
-								"getprop",
-								"ro.build.version.release",
-							])
-						).stdout.trim();
-					} catch {
-						// Optional metadata: device state remains authoritative.
-						version = undefined;
-					}
-				}
+				const [avd, version] =
+					state === "device"
+						? await Promise.all([this.avdName(serial), this.osVersion(serial)])
+						: [undefined, undefined];
 				const model = /(?:^|\s)model:(\S+)/u.exec(details)?.[1];
 				return {
 					id: `android:${serial}`,
@@ -199,7 +204,7 @@ export class AndroidController {
 		const runningAvds = new Set(
 			online.flatMap((device) => (device.avd ? [device.avd] : [])),
 		);
-		const shutdown = (await this.listAvds())
+		const shutdown = avds
 			.filter((name) => !runningAvds.has(name))
 			.map(
 				(name): AndroidDevice => ({
@@ -224,6 +229,17 @@ export class AndroidController {
 
 	private async bootUnlocked(avd: string, timeoutMs: number): Promise<string> {
 		const attached = await this.rawDevices();
+		// Booting a running AVD would start a conflicting second instance.
+		const names = await Promise.all(
+			attached.map(({ serial, state }) =>
+				state === "device" ? this.avdName(serial) : undefined,
+			),
+		);
+		const running = attached[names.indexOf(avd)];
+		if (running) {
+			await this.waitForBoot(running.serial, timeoutMs);
+			return running.serial;
+		}
 		const usedPorts = new Set(
 			attached.map(({ serial }) => Number(serial.slice("emulator-".length))),
 		);
@@ -348,24 +364,15 @@ export class AndroidController {
 		if (!uid || !/^\d+$/u.test(uid))
 			throw new Error(`${packageName} is not installed on ${serial}`);
 		const since = ((Date.now() - sinceMinutes * 60_000) / 1_000).toFixed(3);
-		return (
-			await this.command(
-				serial,
-				[
-					"logcat",
-					"-d",
-					"-T",
-					since,
-					"-m",
-					String(maxLines),
-					`--uid=${uid}`,
-					"-v",
-					"threadtime",
-				],
-				30_000,
-				4 * 1024 * 1024,
-			)
-		).stdout;
+		// `-m` would stop after the oldest lines in the window; the newest lines
+		// are the useful ones, so read the window and keep its tail.
+		const { stdout } = await this.command(
+			serial,
+			["logcat", "-d", "-T", since, `--uid=${uid}`, "-v", "threadtime"],
+			30_000,
+			32 * 1024 * 1024,
+		);
+		return tailLines(stdout, maxLines);
 	}
 
 	async setPermission(
@@ -610,11 +617,14 @@ export class AndroidController {
 	async uiTree(serial: string): Promise<string> {
 		const remotePath = "/sdcard/mobile-mcp-ui.xml";
 		try {
-			const { stdout: dump } = await this.command(
+			// uiautomator reports failures such as "could not get idle state" on
+			// stderr while still exiting 0, so both streams feed validation.
+			const { stdout, stderr } = await this.command(
 				serial,
 				["shell", "uiautomator", "dump", "--compressed", remotePath],
 				15_000,
 			);
+			const dump = `${stdout}\n${stderr}`;
 			const { stdout: tree } = await this.command(
 				serial,
 				["exec-out", "cat", remotePath],
@@ -647,14 +657,17 @@ export class AndroidController {
 
 	private async validatePoint(
 		serial: string,
-		x: number,
-		y: number,
+		...points: number[]
 	): Promise<void> {
 		const { width, height } = await this.screenSize(serial);
-		if (x >= width || y >= height)
-			throw new Error(
-				`Coordinates (${x}, ${y}) exceed screen size ${width}x${height}`,
-			);
+		for (let index = 0; index < points.length; index += 2) {
+			const x = points[index] ?? 0;
+			const y = points[index + 1] ?? 0;
+			if (x >= width || y >= height)
+				throw new Error(
+					`Coordinates (${x}, ${y}) exceed screen size ${width}x${height}`,
+				);
+		}
 	}
 
 	async tap(serial: string, x: number, y: number): Promise<void> {
@@ -670,10 +683,7 @@ export class AndroidController {
 		toY: number,
 		durationMs: number,
 	): Promise<void> {
-		await Promise.all([
-			this.validatePoint(serial, fromX, fromY),
-			this.validatePoint(serial, toX, toY),
-		]);
+		await this.validatePoint(serial, fromX, fromY, toX, toY);
 		await this.command(serial, [
 			"shell",
 			"input",

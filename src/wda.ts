@@ -35,6 +35,22 @@ interface WdaResponse {
 	value?: unknown;
 }
 
+/** W3C error from WebDriverAgent; `code` is the W3C `error` string. */
+export class WdaError extends Error {
+	constructor(
+		message: string,
+		readonly status: number,
+		readonly code: string | undefined,
+	) {
+		super(message);
+		this.name = "WdaError";
+	}
+}
+
+export function isInvalidSession(error: unknown): boolean {
+	return error instanceof WdaError && error.code === "invalid session id";
+}
+
 function object(value: unknown, context: string): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value)) {
 		throw new Error(`WebDriverAgent returned invalid ${context}`);
@@ -45,7 +61,11 @@ function object(value: unknown, context: string): Record<string, unknown> {
 export class WdaController {
 	private agent: WebDriverAgent | undefined;
 	private udid: string | undefined;
+	private sessionPath: string | undefined;
 	private operationQueue: Promise<void> = Promise.resolve();
+
+	/** `baseUrl` exists for tests; the launched agent always binds port 8100. */
+	constructor(private readonly baseUrl = WDA_URL) {}
 
 	private async request(
 		path: string,
@@ -60,7 +80,7 @@ export class WdaController {
 			headers.set("content-type", "application/json");
 			requestInit.headers = headers;
 		}
-		const response = await fetch(`${WDA_URL}${path}`, requestInit);
+		const response = await fetch(`${this.baseUrl}${path}`, requestInit);
 		const text = await response.text();
 		let payload: WdaResponse = {};
 		if (text) {
@@ -73,9 +93,15 @@ export class WdaController {
 			}
 		}
 		if (!response.ok) {
-			const message = object(payload, "error response").value;
-			throw new Error(
-				`WebDriverAgent HTTP ${response.status}: ${JSON.stringify(message ?? payload)}`,
+			const detail = object(payload, "error response").value;
+			const code =
+				detail && typeof detail === "object" && "error" in detail
+					? String(detail.error)
+					: undefined;
+			throw new WdaError(
+				`WebDriverAgent HTTP ${response.status}: ${JSON.stringify(detail ?? payload)}`,
+				response.status,
+				code,
 			);
 		}
 		return payload;
@@ -102,9 +128,18 @@ export class WdaController {
 		return this.udid === udid;
 	}
 
-	async ensure(udid: string, platformVersion: string): Promise<void> {
+	/**
+	 * Starts WDA for `udid` unless it is already serving that device. The
+	 * platform version is resolved lazily because it costs a `simctl list`
+	 * call that a warm agent never needs.
+	 */
+	async ensure(
+		udid: string,
+		resolvePlatformVersion: () => Promise<string>,
+	): Promise<void> {
 		if (this.agent && this.udid === udid && (await this.isReady())) return;
 		await this.stopAgent();
+		const platformVersion = await resolvePlatformVersion();
 		this.agent = new WebDriverAgent(
 			{
 				device: { udid },
@@ -133,11 +168,11 @@ export class WdaController {
 
 	async use<T>(
 		udid: string,
-		platformVersion: string,
+		resolvePlatformVersion: () => Promise<string>,
 		operation: () => Promise<T>,
 	): Promise<T> {
 		const result = this.operationQueue.then(async () => {
-			await this.ensure(udid, platformVersion);
+			await this.ensure(udid, resolvePlatformVersion);
 			return operation();
 		});
 		this.operationQueue = result.then(
@@ -147,9 +182,7 @@ export class WdaController {
 		return result;
 	}
 
-	private async withSession<T>(
-		operation: (sessionPath: string) => Promise<T>,
-	): Promise<T> {
+	private async createSession(): Promise<string> {
 		const created = await this.request("/session", {
 			method: "POST",
 			body: JSON.stringify({
@@ -159,19 +192,34 @@ export class WdaController {
 		const sessionId = object(created.value, "session").sessionId;
 		if (typeof sessionId !== "string" || !sessionId)
 			throw new Error("WebDriverAgent did not return a session ID");
-		const path = `/session/${encodeURIComponent(sessionId)}`;
+		return `/session/${encodeURIComponent(sessionId)}`;
+	}
+
+	/**
+	 * WDA serves one session at a time, so reuse it instead of paying a
+	 * create/delete round trip per gesture. WDA rejects a stale session during
+	 * routing, before the command runs, so one retry cannot repeat an action.
+	 */
+	private async withSession<T>(
+		operation: (sessionPath: string) => Promise<T>,
+	): Promise<T> {
+		this.sessionPath ??= await this.createSession();
 		try {
-			return await operation(path);
-		} finally {
-			await this.request(path, { method: "DELETE" }).catch((error: unknown) =>
-				logError("Session cleanup failed:", error),
-			);
+			return await operation(this.sessionPath);
+		} catch (error) {
+			if (!isInvalidSession(error)) throw error;
+			this.sessionPath = await this.createSession();
+			return operation(this.sessionPath);
 		}
 	}
 
+	async source(): Promise<unknown> {
+		// WDA 16's router rejects the trailing-slash `/source/` form.
+		return (await this.request("/source?format=json")).value;
+	}
+
 	async uiTree(): Promise<string> {
-		const response = await this.request("/source/?format=json");
-		return JSON.stringify(response.value);
+		return JSON.stringify(await this.source());
 	}
 
 	async activeAppInfo(): Promise<{ appId: string; processId?: number }> {
@@ -193,11 +241,9 @@ export class WdaController {
 	}
 
 	async setOrientation(orientation: string): Promise<void> {
-		await this.withSession(async (sessionPath) => {
-			await this.request(`${sessionPath}/orientation`, {
-				method: "POST",
-				body: JSON.stringify({ orientation }),
-			});
+		await this.request("/orientation", {
+			method: "POST",
+			body: JSON.stringify({ orientation }),
 		});
 	}
 
@@ -206,15 +252,16 @@ export class WdaController {
 		height: number;
 		orientation: string;
 	}> {
-		const size = await this.withSession((sessionPath) =>
-			this.screenSize(sessionPath),
-		);
-		return { ...size, orientation: await this.getOrientation() };
+		const [size, orientation] = await Promise.all([
+			this.screenSize(),
+			this.getOrientation(),
+		]);
+		return { ...size, orientation };
 	}
 
 	async longPress(x: number, y: number, durationMs: number): Promise<void> {
+		await this.validatePoint(x, y);
 		await this.withSession(async (sessionPath) => {
-			await this.validatePoint(sessionPath, x, y);
 			// WDA's touchAndHold duration is expressed in seconds.
 			await this.request(`${sessionPath}/wda/touchAndHold`, {
 				method: "POST",
@@ -223,10 +270,8 @@ export class WdaController {
 		});
 	}
 
-	private async screenSize(
-		sessionPath: string,
-	): Promise<{ width: number; height: number }> {
-		const response = await this.request(`${sessionPath}/wda/screen`);
+	private async screenSize(): Promise<{ width: number; height: number }> {
+		const response = await this.request("/wda/screen");
 		const size = object(
 			object(response.value, "screen").screenSize,
 			"screen size",
@@ -237,26 +282,24 @@ export class WdaController {
 		return { width: size.width, height: size.height };
 	}
 
-	private async validatePoint(
-		sessionPath: string,
-		x: number,
-		y: number,
-	): Promise<void> {
-		const { width, height } = await this.screenSize(sessionPath);
-		if (x >= width || y >= height)
-			throw new Error(
-				`Coordinates (${x}, ${y}) exceed screen size ${width}x${height}`,
-			);
+	private async validatePoint(...points: number[]): Promise<void> {
+		const { width, height } = await this.screenSize();
+		for (let index = 0; index < points.length; index += 2) {
+			const x = points[index] ?? 0;
+			const y = points[index + 1] ?? 0;
+			if (x >= width || y >= height)
+				throw new Error(
+					`Coordinates (${x}, ${y}) exceed screen size ${width}x${height}`,
+				);
+		}
 	}
 
 	private async actions(
 		actions: Record<string, unknown>[],
-		points: Array<[number, number]>,
+		points: number[],
 	): Promise<void> {
+		await this.validatePoint(...points);
 		await this.withSession(async (sessionPath) => {
-			await Promise.all(
-				points.map(([x, y]) => this.validatePoint(sessionPath, x, y)),
-			);
 			await this.request(`${sessionPath}/actions`, {
 				method: "POST",
 				body: JSON.stringify({
@@ -281,7 +324,7 @@ export class WdaController {
 				{ type: "pause", duration: 80 },
 				{ type: "pointerUp", button: 0 },
 			],
-			[[x, y]],
+			[x, y],
 		);
 	}
 
@@ -299,10 +342,7 @@ export class WdaController {
 				{ type: "pointerMove", duration: durationMs, x: toX, y: toY },
 				{ type: "pointerUp", button: 0 },
 			],
-			[
-				[fromX, fromY],
-				[toX, toY],
-			],
+			[fromX, fromY, toX, toY],
 		);
 	}
 
@@ -341,6 +381,7 @@ export class WdaController {
 		const agent = this.agent;
 		this.agent = undefined;
 		this.udid = undefined;
+		this.sessionPath = undefined;
 		if (agent)
 			await agent
 				.quit()

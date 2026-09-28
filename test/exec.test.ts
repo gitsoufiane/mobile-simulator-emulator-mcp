@@ -1,6 +1,11 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { CommandError, run } from "../src/exec.js";
+import { CommandError, run, tailLines } from "../src/exec.js";
+
+test("keeps the newest log lines", () => {
+	assert.equal(tailLines("old\nmid\r\nnew\n", 2), "mid\nnew");
+	assert.equal(tailLines("only", 5), "only");
+});
 
 test("handles a child closing stdin before input drains", async () => {
 	await run(process.execPath, ["-e", "process.exit(0)"], {

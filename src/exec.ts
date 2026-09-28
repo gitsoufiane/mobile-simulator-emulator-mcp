@@ -96,6 +96,11 @@ export async function runBinary(
 	return result.stdout as Buffer;
 }
 
+/** Returns the last `maxLines` lines, ignoring the trailing newline. */
+export function tailLines(text: string, maxLines: number): string {
+	return text.trimEnd().split(/\r?\n/u).slice(-maxLines).join("\n");
+}
+
 export function sleep(ms: number): Promise<void> {
 	return new Promise((resolve) => setTimeout(resolve, ms));
 }

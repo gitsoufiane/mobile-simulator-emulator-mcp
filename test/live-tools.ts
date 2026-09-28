@@ -90,6 +90,28 @@ try {
 		`android screen ${String(screen.width)}x${String(screen.height)} ${String(screen.orientation)}`,
 	);
 
+	// Element centers must land on screen and the query filter must narrow.
+	const elements = await call("mobile_list_elements", { device: android.id });
+	const listedElements = elements.elements as Array<{
+		label?: string;
+		center: { x: number; y: number };
+	}>;
+	assert.ok(listedElements.length > 0, "home screen exposes elements");
+	for (const { center } of listedElements) {
+		assert.ok(center.x >= 0 && center.x < (screen.width as number));
+		assert.ok(center.y >= 0 && center.y < (screen.height as number));
+	}
+	const labeled = listedElements.find((entry) => entry.label);
+	if (labeled?.label) {
+		const filtered = await call("mobile_list_elements", {
+			device: android.id,
+			query: labeled.label,
+		});
+		assert.ok((filtered.count as number) >= 1);
+		assert.ok((filtered.count as number) <= (elements.count as number));
+	}
+	passed.push(`android list_elements (${String(elements.count)} elements)`);
+
 	const foreground = await call("mobile_get_foreground_app", {
 		device: android.id,
 	});
@@ -144,9 +166,31 @@ try {
 			device: ios.id,
 		});
 		assert.ok(typeof iosForeground.appId === "string");
-		for (const orientation of ["landscape", "portrait"] as const)
-			await call("mobile_set_orientation", { device: ios.id, orientation });
-		passed.push("ios WDA screen_info, foreground_app, orientation round-trip");
+		const iosElements = await call("mobile_list_elements", { device: ios.id });
+		assert.ok((iosElements.count as number) > 0);
+		// The iPhone home screen is portrait-only; rotate inside Safari instead.
+		const rotatable = { device: ios.id, appId: "com.apple.mobilesafari" };
+		const homeRotation = await client.callTool({
+			name: "mobile_set_orientation",
+			arguments: { device: ios.id, orientation: "landscape" },
+		});
+		if (homeRotation.isError)
+			assert.match(JSON.stringify(homeRotation.content), /portrait-only/u);
+		await call("mobile_launch_app", rotatable);
+		try {
+			for (const orientation of ["landscape", "portrait"] as const)
+				await call("mobile_set_orientation", { device: ios.id, orientation });
+		} finally {
+			await call("mobile_set_orientation", {
+				device: ios.id,
+				orientation: "portrait",
+			}).catch(() => undefined);
+			await call("mobile_terminate_app", rotatable);
+			await call("mobile_press_key", { device: ios.id, key: "HOME" });
+		}
+		passed.push(
+			"ios WDA screen_info, foreground_app, list_elements, orientation round-trip",
+		);
 	}
 
 	for (const entry of passed) console.log(`PASS  ${entry}`);

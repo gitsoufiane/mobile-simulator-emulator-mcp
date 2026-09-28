@@ -1,19 +1,41 @@
+import { readFileSync } from "node:fs";
 import { realpath, stat } from "node:fs/promises";
 import { extname, relative, resolve } from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
 import { AndroidController, type AndroidKey, KEYCODES } from "./android.js";
+import {
+	filterElements,
+	parseAndroidElements,
+	parseIosElements,
+} from "./elements.js";
 import { run } from "./exec.js";
 import { IosController } from "./ios.js";
 import { WdaController } from "./wda.js";
 
-const VERSION = "0.3.0";
+function packageVersion(): string {
+	// Compiled to dist/src/, so the package manifest is two levels up.
+	const manifest = new URL("../../package.json", import.meta.url);
+	let parsed: { version?: unknown };
+	try {
+		parsed = JSON.parse(readFileSync(manifest, "utf8")) as typeof parsed;
+	} catch (error) {
+		throw new Error(
+			`Cannot read ${manifest.pathname}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (typeof parsed.version !== "string")
+		throw new Error(`${manifest.pathname} has no version`);
+	return parsed.version;
+}
+
+const VERSION = packageVersion();
 const INSTRUCTIONS = `Controls local iOS Simulators and Android Emulators for app testing. Physical devices are rejected.
 
 Call mobile_doctor first, then mobile_list_devices, and reuse the exact returned ID (ios:<UDID>, android:emulator-5554, or android-avd:<name>) in every later call.
 Discover app identifiers with mobile_list_apps instead of guessing bundle IDs or package names.
-Read the screen before acting: mobile_get_ui_tree or mobile_take_screenshot for coordinates, then mobile_tap, mobile_long_press, mobile_swipe, or mobile_type_text. Re-read after every state-changing action.
+Read the screen before acting: mobile_list_elements returns compact elements with tap-ready center coordinates (pass query to find one element); use mobile_take_screenshot for visual context and mobile_get_ui_tree only when the full native hierarchy is needed. Then use mobile_tap, mobile_long_press, mobile_swipe, or mobile_type_text, and re-read after every state-changing action.
 
 The first iOS UI call builds and launches WebDriverAgent through Xcode and can take several minutes; later iOS calls reuse that process.
 Destructive tools (install, uninstall, reset, erase, permission changes) run without extra confirmation, so target only disposable app and device state.
@@ -85,8 +107,24 @@ interface BootDevice {
 	target: string;
 }
 
+export interface MobileControllers {
+	android: AndroidController;
+	ios: IosController;
+	wda: WdaController;
+}
+
+export function createControllers(): MobileControllers {
+	return {
+		android: new AndroidController(),
+		ios: new IosController(),
+		wda: new WdaController(),
+	};
+}
+
 interface ServerOptions {
 	doctor?: () => Promise<Record<string, unknown>>;
+	/** Shared controllers; when supplied, the caller owns their cleanup. */
+	controllers?: MobileControllers;
 }
 
 export function parseOnlineDevice(id: string): OnlineDevice {
@@ -289,9 +327,8 @@ export function createMobileServer(options: ServerOptions = {}): {
 	server: McpServer;
 	close: () => Promise<void>;
 } {
-	const android = new AndroidController();
-	const ios = new IosController();
-	const wda = new WdaController();
+	const ownsControllers = options.controllers === undefined;
+	const { android, ios, wda } = options.controllers ?? createControllers();
 	const server = new McpServer(
 		{ name: "local-mobile-mcp-server", version: VERSION },
 		{ instructions: INSTRUCTIONS },
@@ -360,6 +397,8 @@ export function createMobileServer(options: ServerOptions = {}): {
 		if (device.state !== "online") throw new Error(`ios:${udid} is not booted`);
 		return device.version;
 	};
+	const useWda = <T>(udid: string, operation: () => Promise<T>): Promise<T> =>
+		wda.use(udid, () => getBootedIosVersion(udid), operation);
 
 	const deviceSchema = z
 		.string()
@@ -665,8 +704,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		safe(async ({ device }) => {
 			const target = parseOnlineDevice(device);
 			if (target.platform === "ios") {
-				const version = await getBootedIosVersion(target.target);
-				const info = await wda.use(target.target, version, () =>
+				const info = await useWda(target.target, () =>
 					wda.activeAppInfo(),
 				);
 				return jsonResult({ device, platform: "ios", ...info });
@@ -1484,10 +1522,15 @@ export function createMobileServer(options: ServerOptions = {}): {
 				throw new Error(
 					"mobile_set_orientation supports iOS Simulators only; use mobile_rotate on Android",
 				);
-			const version = await getBootedIosVersion(target.target);
-			await wda.use(target.target, version, () =>
+			await useWda(target.target, () =>
 				wda.setOrientation(IOS_ORIENTATIONS[orientation]),
-			);
+			).catch((error: unknown) => {
+				if (String(error).includes("Unable To Rotate Device"))
+					throw new Error(
+						`The foreground app does not support ${orientation}. The iPhone home screen is portrait-only; launch an app that supports ${orientation} first.`,
+					);
+				throw error;
+			});
 			return jsonResult({ device, orientation });
 		}),
 	);
@@ -1585,8 +1628,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 			let tree: string;
 			let format: "json" | "xml";
 			if (target.platform === "ios") {
-				const version = await getBootedIosVersion(target.target);
-				tree = await wda.use(target.target, version, () => wda.uiTree());
+				tree = await useWda(target.target, () => wda.uiTree());
 				format = "json";
 			} else {
 				tree = await android.uiTree(target.target);
@@ -1598,6 +1640,66 @@ export function createMobileServer(options: ServerOptions = {}): {
 				format: limited.truncated ? `${format}-fragment` : format,
 				tree: limited.value,
 				truncated: limited.truncated,
+			});
+		}),
+	);
+
+	const rectSchema = z.object({
+		x: z.number(),
+		y: z.number(),
+		width: z.number(),
+		height: z.number(),
+	});
+	server.registerTool(
+		"mobile_list_elements",
+		{
+			title: "List On-Screen Elements",
+			description:
+				"Return a compact list of visible labeled or interactive elements with tap-ready center coordinates in mobile_tap units. Costs far fewer tokens than mobile_get_ui_tree; pass query to filter by label, identifier, value, or type.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					query: z.string().min(1).max(200).optional(),
+					limit: z.number().int().min(1).max(1_000).default(200),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				platform: platformSchema,
+				count: z.number().int().nonnegative(),
+				truncated: z.boolean(),
+				elements: z.array(
+					z.object({
+						type: z.string(),
+						label: z.string().optional(),
+						id: z.string().optional(),
+						value: z.string().optional(),
+						rect: rectSchema,
+						center: z.object({ x: z.number(), y: z.number() }),
+						flags: z.array(z.string()).optional(),
+					}),
+				),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, query, limit }) => {
+			const target = parseOnlineDevice(device);
+			const all =
+				target.platform === "ios"
+					? parseIosElements(await useWda(target.target, () => wda.source()))
+					: parseAndroidElements(await android.uiTree(target.target));
+			const matched = filterElements(all, query);
+			return jsonResult({
+				device,
+				platform: target.platform,
+				count: matched.length,
+				truncated: matched.length > limit,
+				elements: matched.slice(0, limit),
 			});
 		}),
 	);
@@ -1627,8 +1729,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		safe(async ({ device }) => {
 			const target = parseOnlineDevice(device);
 			if (target.platform === "ios") {
-				const version = await getBootedIosVersion(target.target);
-				const info = await wda.use(target.target, version, () =>
+				const info = await useWda(target.target, () =>
 					wda.screenInfo(),
 				);
 				return jsonResult({
@@ -1670,8 +1771,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		safe(async ({ device, x, y }) => {
 			const target = parseOnlineDevice(device);
 			if (target.platform === "ios") {
-				const version = await getBootedIosVersion(target.target);
-				await wda.use(target.target, version, () => wda.tap(x, y));
+				await useWda(target.target, () => wda.tap(x, y));
 			} else await android.tap(target.target, x, y);
 			return jsonResult({ device, tapped: { x, y } });
 		}),
@@ -1709,8 +1809,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		safe(async ({ device, x, y, durationMs }) => {
 			const target = parseOnlineDevice(device);
 			if (target.platform === "ios") {
-				const version = await getBootedIosVersion(target.target);
-				await wda.use(target.target, version, () =>
+				await useWda(target.target, () =>
 					wda.longPress(x, y, durationMs),
 				);
 			} else await android.longPress(target.target, x, y, durationMs);
@@ -1754,8 +1853,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		safe(async ({ device, fromX, fromY, toX, toY, durationMs }) => {
 			const target = parseOnlineDevice(device);
 			if (target.platform === "ios") {
-				const version = await getBootedIosVersion(target.target);
-				await wda.use(target.target, version, () =>
+				await useWda(target.target, () =>
 					wda.swipe(fromX, fromY, toX, toY, durationMs),
 				);
 			} else
@@ -1790,8 +1888,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		safe(async ({ device, text }) => {
 			const target = parseOnlineDevice(device);
 			if (target.platform === "ios") {
-				const version = await getBootedIosVersion(target.target);
-				await wda.use(target.target, version, () => wda.typeText(text));
+				await useWda(target.target, () => wda.typeText(text));
 			} else await android.typeText(target.target, text);
 			return jsonResult({ device, typedCharacters: [...text].length });
 		}),
@@ -1830,12 +1927,16 @@ export function createMobileServer(options: ServerOptions = {}): {
 					throw new Error(
 						`${key} is Android-only; iOS supports ${[...IOS_KEYS].join(", ")}`,
 					);
-				const version = await getBootedIosVersion(target.target);
-				await wda.use(target.target, version, () => wda.pressKey(iosKey));
+				await useWda(target.target, () => wda.pressKey(iosKey));
 			} else await android.pressKey(target.target, key);
 			return jsonResult({ device, pressed: key });
 		}),
 	);
 
-	return { server, close: () => wda.close() };
+	return {
+		server,
+		close: async () => {
+			if (ownsControllers) await wda.close();
+		},
+	};
 }

@@ -1,9 +1,24 @@
 {
   "name": "local-mobile-mcp-server",
-  "version": "0.3.0",
+  "version": "0.4.0",
   "description": "Local MCP server for controlling iOS Simulators and Android Emulators",
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "ios-simulator",
+    "android-emulator",
+    "mobile-testing",
+    "webdriveragent",
+    "adb",
+    "simctl"
+  ],
+  "homepage": "https://github.com/gitsoufiane/mobile-simulator-emulator-mcp#readme",
+  "bugs": "https://github.com/gitsoufiane/mobile-simulator-emulator-mcp/issues",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/gitsoufiane/mobile-simulator-emulator-mcp.git"
+  },
   "type": "module",
-  "private": true,
   "bin": {
     "mobile-mcp-server": "dist/src/index.js"
   },
@@ -13,7 +28,7 @@
     "LICENSE"
   ],
   "engines": {
-    "node": ">=24"
+    "node": "^22.18.0 || >=24.2.0"
   },
   "os": [
     "darwin"
@@ -23,14 +38,16 @@
     "start": "node dist/src/index.js",
     "test": "node --test dist/test/*.test.js",
     "check": "npm run build && npm test",
+    "prepare": "npm run build",
+    "prepublishOnly": "npm run check",
     "live": "node dist/test/live-smoke.js",
     "live:deep": "node dist/test/live-manipulation.js",
     "live:tools": "node dist/test/live-tools.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.30.0",
-    "appium-webdriveragent": "15.1.6",
-    "zod": "4.4.3"
+    "@modelcontextprotocol/sdk": "1.30.1",
+    "appium-webdriveragent": "16.12.10",
+    "zod": "4.6.5"
   },
   "devDependencies": {
     "@types/node": "24.13.3",

@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { readFile, unlink, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CommandError, run } from "./exec.js";
+import { CommandError, run, tailLines } from "./exec.js";
 
 export interface SimctlDevice {
 	udid: string;
@@ -205,7 +205,7 @@ export class IosController {
 			// to maxLines below, so simctl gets killed for exceeding maxBuffer.
 			32 * 1024 * 1024,
 		);
-		return stdout.split(/\r?\n/u).slice(-maxLines).join("\n");
+		return tailLines(stdout, maxLines);
 	}
 
 	async listApps(udid: string, includeSystem: boolean): Promise<MobileApp[]> {

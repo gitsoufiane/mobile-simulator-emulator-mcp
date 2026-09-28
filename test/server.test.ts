@@ -26,7 +26,7 @@ after(async () => {
 test("lists the focused mobile tool surface", async () => {
 	const result = await client.listTools();
 	const names = result.tools.map((tool) => tool.name);
-	assert.equal(names.length, 38);
+	assert.equal(names.length, 39);
 	assert.deepEqual(names, [
 		"mobile_doctor",
 		"mobile_list_devices",
@@ -60,6 +60,7 @@ test("lists the focused mobile tool surface", async () => {
 		"mobile_open_url",
 		"mobile_take_screenshot",
 		"mobile_get_ui_tree",
+		"mobile_list_elements",
 		"mobile_get_screen_info",
 		"mobile_tap",
 		"mobile_long_press",
@@ -96,6 +97,7 @@ test("advertises server instructions for agent onboarding", () => {
 	assert.match(String(instructions), /mobile_doctor/u);
 	assert.match(String(instructions), /mobile_list_devices/u);
 	assert.match(String(instructions), /WebDriverAgent/u);
+	assert.match(String(instructions), /mobile_list_elements/u);
 });
 
 test("returns structured data for a valid call", async () => {

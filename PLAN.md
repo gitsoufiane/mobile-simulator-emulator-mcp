@@ -53,10 +53,11 @@ Build a local MCP server that lets an agent discover and control Apple iOS Simul
 36. `mobile_set_accessibility`
 37. `mobile_add_media`
 38. `mobile_set_orientation`
+39. `mobile_list_elements`
 
 ## Safety boundaries
 
-- stdio by default; `--listen` binds Streamable HTTP to `127.0.0.1` only, with no remote listener and the same trust model as stdio.
+- stdio by default; `--listen` binds Streamable HTTP to `127.0.0.1` only, with no remote listener and the same trust model as stdio. Requests whose `Host` or `Origin` is not loopback get HTTP 403 (MCP transport DNS-rebinding requirement). All HTTP sessions share one controller set, so one WebDriverAgent serves port 8100.
 - Per-command timeouts and output caps.
 - Media and app install paths are confined beneath `MOBILE_MCP_APP_ROOT` by one shared resolver, with an extension allowlist for media.
 - Strict identifiers, coordinates, durations, URL schemes, and local app paths.

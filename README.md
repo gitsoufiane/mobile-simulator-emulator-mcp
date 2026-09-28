@@ -1,6 +1,6 @@
 # Mobile Simulator & Emulator MCP
 
-A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets coding agents inspect, control, and test Apple iOS Simulators and Google Android Emulators. It exposes 38 typed tools for device lifecycle, app discovery and management, UI automation, screenshots, logs, permissions, location, appearance/accessibility, and platform-specific test conditions.
+A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets coding agents inspect, control, and test Apple iOS Simulators and Google Android Emulators. It exposes 39 typed tools for device lifecycle, app discovery and management, UI automation, compact element lookup, screenshots, logs, permissions, location, appearance/accessibility, and platform-specific test conditions.
 
 It defaults to stdio and can also serve Streamable HTTP on loopback with `--listen`.
 
@@ -16,7 +16,7 @@ Physical devices are intentionally rejected.
 
 - macOS with Xcode and at least one installed iOS Simulator runtime.
 - Android SDK Platform Tools and Android Emulator.
-- Node.js 24 or newer.
+- Node.js 22.18+ or 24.2+.
 - A booted simulator/emulator for interaction tools. `mobile_boot_device` can boot an installed target returned by `mobile_list_devices`.
 
 Verify the native tools:
@@ -29,7 +29,13 @@ emulator -list-avds
 
 ## Quick start
 
-This package is currently installed from source:
+Run it straight from GitHub. npm clones the repository, installs dependencies, and builds it on first use:
+
+```bash
+npx -y github:gitsoufiane/mobile-simulator-emulator-mcp
+```
+
+Or build from source:
 
 ```bash
 git clone https://github.com/gitsoufiane/mobile-simulator-emulator-mcp.git
@@ -61,7 +67,22 @@ The first iOS UI interaction builds and launches WebDriverAgent through Xcode. I
 
 ## Configure an MCP client
 
-Any MCP client that supports local stdio servers can run this server. Build first, then add the following server definition to the client's MCP configuration, replacing the absolute path:
+Any MCP client that supports local stdio servers can run this server. Add one of the following server definitions to the client's MCP configuration.
+
+With `npx` (no clone needed):
+
+```json
+{
+  "mcpServers": {
+    "mobile": {
+      "command": "npx",
+      "args": ["-y", "github:gitsoufiane/mobile-simulator-emulator-mcp"]
+    }
+  }
+}
+```
+
+From a local build, replacing the absolute path:
 
 ```json
 {
@@ -89,8 +110,13 @@ node dist/src/index.js --listen 3000
 
 The HTTP listener binds to `127.0.0.1` only and has no authentication — it
 is strictly a same-machine transport with the same trust model as stdio.
-Each MCP session gets its own server instance; sessions are cleaned up on
-disconnect. stdio remains the default when `--listen` is not given.
+As the MCP transport specification requires, it rejects with HTTP 403 any
+request whose `Host` or `Origin` header is not `127.0.0.1`, `localhost`, or
+`[::1]`, so a web page cannot reach it through DNS rebinding.
+Each MCP session gets its own protocol server, and all sessions share one
+set of device controllers, so they share one WebDriverAgent process.
+Sessions are cleaned up on disconnect. stdio remains the default when
+`--listen` is not given.
 
 Restart the MCP client after changing its configuration. The first calls should be:
 
@@ -111,7 +137,7 @@ The server writes MCP protocol messages only to stdout. Diagnostics and WebDrive
 3. Boot a shutdown target if needed.
 4. Install and launch the app. Use `mobile_list_apps` to look up the exact bundle ID or package name instead of guessing, and `mobile_get_foreground_app` to confirm the launch landed.
 5. Set permissions or simulated location needed by the scenario.
-6. Call `mobile_get_ui_tree` before using coordinates; use `mobile_take_screenshot` when visual context is needed.
+6. Call `mobile_list_elements` before using coordinates. It returns compact elements with tap-ready `center` coordinates; pass `query` to find one element. Use `mobile_take_screenshot` for visual context and `mobile_get_ui_tree` only when you need the full native hierarchy.
 7. Interact with `mobile_tap`, `mobile_swipe`, `mobile_type_text`, and `mobile_press_key`.
 8. Re-read the UI tree or screenshot after each state-changing action.
 9. Collect `mobile_get_logs` when a workflow fails. Use `mobile_reset_app` only when a clean app state is required.
@@ -165,6 +191,7 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | `mobile_open_url` | Open an allowed URL or deep link |
 | `mobile_take_screenshot` | Return a PNG image directly to the client |
 | `mobile_get_ui_tree` | Return iOS JSON or Android XML UI hierarchy |
+| `mobile_list_elements` | Return compact labeled/interactive elements with tap-ready center coordinates |
 | `mobile_get_screen_info` | Return screen width, height, orientation, and density |
 | `mobile_tap` | Tap validated coordinates |
 | `mobile_long_press` | Press and hold validated coordinates |
@@ -191,7 +218,7 @@ Always use IDs from the latest `mobile_list_devices` result.
 
 ## Security model
 
-- Local stdio transport only; there is no MCP HTTP listener or remote authentication surface.
+- stdio by default. The optional `--listen` HTTP transport binds to `127.0.0.1` only and rejects non-loopback `Host`/`Origin` headers (DNS-rebinding protection). There is no remote listener or authentication surface.
 - No arbitrary shell, `adb shell`, or `simctl spawn` tool is exposed.
 - Native commands use argument arrays, explicit Android serials, timeouts, and output limits.
 - Physical devices, device creation/deletion, raw native-command passthrough, and arbitrary host shell access are not supported.
@@ -203,7 +230,8 @@ Treat this server like any local developer tool: it runs with the MCP client's o
 
 ## Limits
 
-- One iOS Simulator can own the WDA process on port 8100 at a time. Android can run concurrently.
+- One iOS Simulator can own the WDA process on port 8100 at a time, across all stdio or HTTP sessions of one server process. Android can run concurrently.
+- `mobile_list_elements` keeps elements that have a label, identifier, or value, or that are interactive. Layout containers and iOS keyboard keys are omitted; use `mobile_get_ui_tree` when you need them.
 - `mobile_get_ui_tree` and Android input need the screen on and unlocked. A sleeping Android Emulator makes `uiautomator dump` fail, and the server reports that as an error rather than returning an empty tree.
 - `mobile_set_accessibility` splits by platform: `contentSize`/`increaseContrast` are iOS-only, `fontScale` is Android-only.
 - `mobile_list_apps` returns Android package names without display labels; iOS returns `CFBundleDisplayName` when the app declares one.
@@ -262,7 +290,8 @@ Destructive app/device tools, permission changes, push, SMS, and install/uninsta
 
 The implementation and tool limits were checked against:
 
-- [MCP tool specification](https://modelcontextprotocol.io/specification/2025-06-18/server/tools) for strict inputs, structured results, annotations, errors, and the client-side trust model for sensitive operations.
+- [MCP tool specification](https://modelcontextprotocol.io/specification/2025-11-25/server/tools) for strict inputs, structured results, annotations, errors, and the client-side trust model for sensitive operations.
+- [MCP transport specification](https://modelcontextprotocol.io/specification/2025-11-25/basic/transports) for Streamable HTTP, loopback binding, and `Origin` validation against DNS rebinding.
 - [Apple Xcode command-line tool reference](https://developer.apple.com/documentation/xcode/xcode-command-line-tool-reference) and the installed `xcrun simctl help` for Simulator lifecycle, logs, privacy, location, push, and screenshots.
 - [Android Debug Bridge](https://developer.android.com/tools/adb), [Logcat](https://developer.android.com/studio/command-line/logcat), and [Emulator console](https://developer.android.com/studio/run/emulator-console) for app state, permissions, logs, location, and emulator lifecycle.
 
