@@ -1,16 +1,29 @@
 import { readFileSync } from "node:fs";
-import { realpath, stat } from "node:fs/promises";
-import { extname, relative, resolve } from "node:path";
+import { lstat, realpath, stat } from "node:fs/promises";
+import {
+	basename,
+	dirname,
+	extname,
+	isAbsolute,
+	join,
+	relative,
+	resolve,
+} from "node:path";
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
 import { z } from "zod";
-import { AndroidController, type AndroidKey, KEYCODES } from "./android.js";
+import {
+	ANDROID_SENSORS,
+	AndroidController,
+	type AndroidKey,
+	KEYCODES,
+} from "./android.js";
 import {
 	filterElements,
 	parseAndroidElements,
 	parseIosElements,
 } from "./elements.js";
-import { run } from "./exec.js";
+import { run, tailLines } from "./exec.js";
 import { IosController } from "./ios.js";
 import { WdaController } from "./wda.js";
 
@@ -39,7 +52,8 @@ Read the screen before acting: mobile_list_elements returns compact elements wit
 
 The first iOS UI call builds and launches WebDriverAgent through Xcode and can take several minutes; later iOS calls reuse that process.
 Destructive tools (install, uninstall, reset, erase, permission changes) run without extra confirmation, so target only disposable app and device state.
-Platform coverage differs: clipboard, push, status bar, accessibility sizing, and mobile_set_orientation are iOS-only; SMS, fingerprint, battery, network profiles, connectivity, and mobile_rotate are Android-only. Each tool reports the unsupported platform in its error message.`;
+Prefer mobile_tap_element (by label) over raw coordinates. On iOS, clear permission prompts and other system alerts with mobile_handle_alert.
+Platform coverage differs: clipboard, push, status bar, alerts, Face ID (mobile_simulate_biometric), keychain, accessibility audit, and location routes are iOS-only; SMS, fingerprint, battery, network profiles, connectivity, snapshots, phone calls, sensors, proxy, and mobile_rotate are Android-only. Each tool reports the unsupported platform in its error message.`;
 const TEXT_LIMIT = 1_000_000;
 const IOS_UUID =
 	/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/iu;
@@ -59,6 +73,26 @@ const MEDIA_EXTENSIONS = new Set([
 	".m4v",
 	".vcf",
 ]);
+const CERTIFICATE_EXTENSIONS = new Set([".pem", ".crt", ".cer", ".der"]);
+// BCP 47 language tag subset: fr, fr-FR, zh-Hans-CN, pt_BR.
+const LOCALE = /^(?:system|[a-z]{2,3}(?:[-_][A-Za-z0-9]{2,8}){0,3})$/u;
+const ENV_NAME = /^[A-Za-z_][A-Za-z0-9_]{0,127}$/u;
+const EXTRA_KEY = /^[A-Za-z_][A-Za-z0-9_.]{0,127}$/u;
+const SNAPSHOT_NAME = /^[A-Za-z0-9._-]{1,64}$/u;
+// host:port with an optional http:// prefix; no credentials.
+const PROXY = /^(?:http:\/\/)?(?:[A-Za-z0-9.-]+|\[[0-9A-Fa-f:]+\]):\d{1,5}$/u;
+const AUDIT_TYPES = {
+	contrast: "XCUIAccessibilityAuditTypeContrast",
+	"dynamic-type": "XCUIAccessibilityAuditTypeDynamicType",
+	"element-detection": "XCUIAccessibilityAuditTypeElementDetection",
+	"hit-region": "XCUIAccessibilityAuditTypeHitRegion",
+	"sufficient-element-description":
+		"XCUIAccessibilityAuditTypeSufficientElementDescription",
+	"text-clipped": "XCUIAccessibilityAuditTypeTextClipped",
+	trait: "XCUIAccessibilityAuditTypeTrait",
+	action: "XCUIAccessibilityAuditTypeAction",
+	"parent-child": "XCUIAccessibilityAuditTypeParentChild",
+} as const;
 const IOS_ORIENTATIONS = {
 	portrait: "PORTRAIT",
 	landscape: "LANDSCAPE",
@@ -207,14 +241,60 @@ export function validateUrl(value: string): string {
 	return url.href;
 }
 
-/** Resolves a client-supplied path and confines it beneath the app root. */
-async function resolveBeneathRoot(value: string): Promise<string> {
+async function appRoot(): Promise<string> {
 	const configuredRoot = resolve(
 		process.env.MOBILE_MCP_APP_ROOT ?? process.cwd(),
 	);
-	const root = await realpath(configuredRoot).catch(() => {
+	return realpath(configuredRoot).catch(() => {
 		throw new Error("MOBILE_MCP_APP_ROOT does not exist");
 	});
+}
+
+function isBeneath(root: string, candidate: string): boolean {
+	const pathFromRoot = relative(root, candidate);
+	return !pathFromRoot.startsWith("..") && !isAbsolute(pathFromRoot);
+}
+
+/**
+ * Confines a new artifact file beneath the app root. The parent directory
+ * must already exist and the file must not, so nothing is ever overwritten.
+ */
+export async function validateOutputPath(
+	value: string,
+	extension: string,
+): Promise<string> {
+	const root = await appRoot();
+	const requested = resolve(root, value);
+	if (extname(requested).toLowerCase() !== extension)
+		throw new Error(`Output files must end in ${extension}`);
+	const parent = await realpath(dirname(requested)).catch(() => {
+		throw new Error(`Output directory does not exist: ${dirname(value)}`);
+	});
+	if (!isBeneath(root, parent))
+		throw new Error("Output path must resolve beneath MOBILE_MCP_APP_ROOT");
+	const output = join(parent, basename(requested));
+	const existing = await lstat(output).catch((error: unknown) => {
+		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
+		throw error;
+	});
+	if (existing) throw new Error(`Output file already exists: ${value}`);
+	return output;
+}
+
+export async function validateCertificatePath(value: string): Promise<string> {
+	const candidate = await resolveBeneathRoot(value);
+	if (!(await stat(candidate)).isFile())
+		throw new Error("Certificate paths must point to a file");
+	if (!CERTIFICATE_EXTENSIONS.has(extname(candidate).toLowerCase()))
+		throw new Error(
+			`Certificates must use one of: ${[...CERTIFICATE_EXTENSIONS].join(", ")}`,
+		);
+	return candidate;
+}
+
+/** Resolves a client-supplied path and confines it beneath the app root. */
+async function resolveBeneathRoot(value: string): Promise<string> {
+	const root = await appRoot();
 	const candidate = await realpath(resolve(root, value)).catch(() => {
 		throw new Error(
 			`Path does not exist beneath MOBILE_MCP_APP_ROOT: ${value}`,
@@ -258,6 +338,12 @@ export async function validateAppPath(
 		throw new Error("iOS Simulator installs require an .app directory");
 	}
 	return candidate;
+}
+
+function stringMap(key: RegExp) {
+	return z
+		.record(z.string().regex(key), z.string().max(4_000))
+		.refine((value) => Object.keys(value).length <= 50, "At most 50 entries");
 }
 
 function jsonResult(data: Record<string, unknown>): CallToolResult {
@@ -406,6 +492,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		.max(128)
 		.describe("Stable device ID returned by mobile_list_devices");
 	const appIdSchema = z.string().min(3).max(255);
+	const phoneNumberSchema = z.string().regex(/^\+?[0-9]{3,20}$/u);
 	const coordinate = z.number().int().min(0).max(100_000);
 	const platformSchema = z.enum(["ios", "android"]);
 	const deviceEntrySchema = z.object({
@@ -583,9 +670,30 @@ export function createMobileServer(options: ServerOptions = {}): {
 		{
 			title: "Launch Mobile App",
 			description:
-				"Launch an installed app by iOS bundle ID or Android package name. Use mobile_list_apps to discover valid identifiers.",
+				"Launch an installed app by iOS bundle ID or Android package name. Use mobile_list_apps to discover valid identifiers. locale sets the app language (iOS per launch, Android 13+ per app until changed). iOS accepts launch arguments and environment variables; Android accepts string intent extras.",
 			inputSchema: z
-				.object({ device: deviceSchema, appId: appIdSchema })
+				.object({
+					device: deviceSchema,
+					appId: appIdSchema,
+					locale: z
+						.string()
+						.regex(LOCALE)
+						.optional()
+						.describe(
+							"Language tag such as fr, fr-FR, or zh-Hans; system restores the device language",
+						),
+					arguments: z
+						.array(z.string().max(1_000))
+						.max(50)
+						.optional()
+						.describe("iOS only: process arguments"),
+					environment: stringMap(ENV_NAME)
+						.optional()
+						.describe("iOS only: environment variables"),
+					extras: stringMap(EXTRA_KEY)
+						.optional()
+						.describe("Android only: string intent extras (am start --es)"),
+				})
 				.strict(),
 			outputSchema: z.object({
 				device: z.string(),
@@ -599,12 +707,24 @@ export function createMobileServer(options: ServerOptions = {}): {
 				openWorldHint: false,
 			},
 		},
-		safe(async ({ device, appId }) => {
+		safe(async ({ device, appId, locale, arguments: args, environment, extras }) => {
 			const target = parseOnlineDevice(device);
 			const checkedAppId = validateAppIdentifier(target.platform, appId);
-			if (target.platform === "ios")
-				await ios.launch(target.target, checkedAppId);
-			else await android.launch(target.target, checkedAppId);
+			if (target.platform === "ios") {
+				if (extras) throw new Error("extras is Android-only; use arguments or environment on iOS");
+				await ios.launch(target.target, checkedAppId, {
+					...(locale && locale !== "system" ? { locale } : {}),
+					...(args ? { arguments: args } : {}),
+					...(environment ? { environment } : {}),
+				});
+			} else {
+				if (args || environment)
+					throw new Error("arguments and environment are iOS-only; use extras on Android");
+				await android.launch(target.target, checkedAppId, {
+					...(locale ? { locale: locale.replaceAll("_", "-") } : {}),
+					...(extras ? { extras } : {}),
+				});
+			}
 			return jsonResult({ device, appId: checkedAppId, launched: true });
 		}),
 	);
@@ -879,17 +999,36 @@ export function createMobileServer(options: ServerOptions = {}): {
 			})
 			.strict(),
 		z.object({ device: deviceSchema, action: z.literal("clear") }).strict(),
+		z
+			.object({
+				device: deviceSchema,
+				action: z.literal("route"),
+				waypoints: z
+					.array(
+						z
+							.object({
+								latitude: z.number().min(-90).max(90),
+								longitude: z.number().min(-180).max(180),
+							})
+							.strict(),
+					)
+					.min(2)
+					.max(100),
+				speedMetersPerSecond: z.number().positive().max(1_000).default(20),
+			})
+			.strict(),
 	]);
 	server.registerTool(
 		"mobile_set_location",
 		{
 			title: "Set Mobile Location",
 			description:
-				"Set simulated latitude/longitude on iOS or Android. Clearing the simulated location is supported on iOS only.",
+				"Set simulated latitude/longitude on iOS or Android. iOS also supports clear and route (move along waypoints at a speed, returning immediately while the Simulator keeps moving).",
 			inputSchema: locationSchema,
 			outputSchema: z.object({
 				device: z.string(),
-				action: z.enum(["set", "clear"]),
+				action: z.enum(["set", "clear", "route"]),
+				waypoints: z.number().int().optional(),
 				latitude: z.number().optional(),
 				longitude: z.number().optional(),
 			}),
@@ -902,6 +1041,22 @@ export function createMobileServer(options: ServerOptions = {}): {
 		},
 		safe(async (args) => {
 			const target = parseOnlineDevice(args.device);
+			if (args.action === "route") {
+				if (target.platform === "android")
+					throw new Error(
+						"Android Emulator has no console command for routes; call set per waypoint",
+					);
+				await ios.startLocationRoute(
+					target.target,
+					args.waypoints,
+					args.speedMetersPerSecond,
+				);
+				return jsonResult({
+					device: args.device,
+					action: "route",
+					waypoints: args.waypoints.length,
+				});
+			}
 			if (args.action === "clear") {
 				if (target.platform === "android")
 					throw new Error(
@@ -1226,15 +1381,18 @@ export function createMobileServer(options: ServerOptions = {}): {
 	server.registerTool(
 		"mobile_set_accessibility",
 		{
-			title: "Set Accessibility Text And Contrast",
+			title: "Set Accessibility Settings",
 			description:
-				"Change accessibility display settings to test layouts. iOS accepts contentSize (Dynamic Type) and increaseContrast; Android accepts fontScale.",
+				"Change accessibility settings to test layouts and assistive technology. Both platforms: reduceMotion (Android removes animations, which also stabilizes UI tests) and screenReader (iOS VoiceOver, Android TalkBack). iOS only: contentSize (Dynamic Type), increaseContrast, reduceTransparency. Android only: fontScale. iOS reduceMotion, reduceTransparency, and screenReader need Xcode 27.",
 			inputSchema: z
 				.object({
 					device: deviceSchema,
 					contentSize: z.enum(IOS_CONTENT_SIZES).optional(),
 					increaseContrast: z.boolean().optional(),
+					reduceTransparency: z.boolean().optional(),
 					fontScale: z.number().min(0.25).max(5).optional(),
+					reduceMotion: z.boolean().optional(),
+					screenReader: z.boolean().optional(),
 				})
 				.strict(),
 			outputSchema: z.object({
@@ -1249,12 +1407,34 @@ export function createMobileServer(options: ServerOptions = {}): {
 				openWorldHint: false,
 			},
 		},
-		safe(async ({ device, contentSize, increaseContrast, fontScale }) => {
+		safe(async (args) => {
+			const {
+				device,
+				contentSize,
+				increaseContrast,
+				reduceTransparency,
+				fontScale,
+				reduceMotion,
+				screenReader,
+			} = args;
 			const target = parseOnlineDevice(device);
 			const applied: string[] = [];
 			if (target.platform === "ios") {
 				if (fontScale !== undefined)
 					throw new Error("fontScale is Android-only; use contentSize on iOS");
+				if (reduceMotion !== undefined || reduceTransparency !== undefined) {
+					await ios.setMotionAndTransparency(target.target, {
+						...(reduceMotion === undefined ? {} : { reduceMotion }),
+						...(reduceTransparency === undefined ? {} : { reduceTransparency }),
+					});
+					if (reduceMotion !== undefined) applied.push("reduceMotion");
+					if (reduceTransparency !== undefined)
+						applied.push("reduceTransparency");
+				}
+				if (screenReader !== undefined) {
+					await ios.setVoiceOver(target.target, screenReader);
+					applied.push("screenReader");
+				}
 				if (contentSize !== undefined) {
 					await ios.setContentSize(target.target, contentSize);
 					applied.push("contentSize");
@@ -1264,13 +1444,25 @@ export function createMobileServer(options: ServerOptions = {}): {
 					applied.push("increaseContrast");
 				}
 			} else {
-				if (contentSize !== undefined || increaseContrast !== undefined)
+				if (
+					contentSize !== undefined ||
+					increaseContrast !== undefined ||
+					reduceTransparency !== undefined
+				)
 					throw new Error(
-						"contentSize and increaseContrast are iOS-only; use fontScale on Android",
+						"contentSize, increaseContrast, and reduceTransparency are iOS-only; use fontScale on Android",
 					);
 				if (fontScale !== undefined) {
 					await android.setFontScale(target.target, fontScale);
 					applied.push("fontScale");
+				}
+				if (reduceMotion !== undefined) {
+					await android.setReduceMotion(target.target, reduceMotion);
+					applied.push("reduceMotion");
+				}
+				if (screenReader !== undefined) {
+					await android.setTalkBack(target.target, screenReader);
+					applied.push("screenReader");
 				}
 			}
 			if (!applied.length)
@@ -1321,7 +1513,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 			inputSchema: z
 				.object({
 					device: deviceSchema,
-					phoneNumber: z.string().regex(/^\+?[0-9]{3,20}$/u),
+					phoneNumber: phoneNumberSchema,
 					text: z.string().min(1).max(1_000),
 				})
 				.strict(),
@@ -1491,18 +1683,19 @@ export function createMobileServer(options: ServerOptions = {}): {
 	server.registerTool(
 		"mobile_set_orientation",
 		{
-			title: "Set iOS Simulator Orientation",
+			title: "Set Screen Orientation",
 			description:
-				"Set an absolute iOS Simulator orientation through WebDriverAgent. Use mobile_rotate for Android Emulators.",
+				"Set an absolute screen orientation. Android locks rotation there until orientation auto restores sensor rotation. iOS uses devicectl on Xcode 27 and falls back to WebDriverAgent on older Xcode.",
 			inputSchema: z
 				.object({
 					device: deviceSchema,
-					orientation: z.enum(
-						Object.keys(IOS_ORIENTATIONS) as [
-							keyof typeof IOS_ORIENTATIONS,
-							...(keyof typeof IOS_ORIENTATIONS)[],
-						],
-					),
+					orientation: z.enum([
+						"portrait",
+						"landscape",
+						"landscape-right",
+						"portrait-upside-down",
+						"auto",
+					]),
 				})
 				.strict(),
 			outputSchema: z.object({
@@ -1518,10 +1711,18 @@ export function createMobileServer(options: ServerOptions = {}): {
 		},
 		safe(async ({ device, orientation }) => {
 			const target = parseOnlineDevice(device);
-			if (target.platform !== "ios")
-				throw new Error(
-					"mobile_set_orientation supports iOS Simulators only; use mobile_rotate on Android",
-				);
+			if (target.platform === "android") {
+				await android.setOrientation(target.target, orientation);
+				return jsonResult({ device, orientation });
+			}
+			if (orientation === "auto")
+				throw new Error("orientation auto is Android-only");
+			try {
+				await ios.setOrientation(target.target, orientation);
+				return jsonResult({ device, orientation });
+			} catch (error) {
+				if (!String(error).includes("needs Xcode 27")) throw error;
+			}
 			await useWda(target.target, () =>
 				wda.setOrientation(IOS_ORIENTATIONS[orientation]),
 			).catch((error: unknown) => {
@@ -1650,6 +1851,19 @@ export function createMobileServer(options: ServerOptions = {}): {
 		width: z.number(),
 		height: z.number(),
 	});
+	const elementSchema = z.object({
+		type: z.string(),
+		label: z.string().optional(),
+		id: z.string().optional(),
+		value: z.string().optional(),
+		rect: rectSchema,
+		center: z.object({ x: z.number(), y: z.number() }),
+		flags: z.array(z.string()).optional(),
+	});
+	const readElements = async (target: OnlineDevice) =>
+		target.platform === "ios"
+			? parseIosElements(await useWda(target.target, () => wda.source()))
+			: parseAndroidElements(await android.uiTree(target.target));
 	server.registerTool(
 		"mobile_list_elements",
 		{
@@ -1668,17 +1882,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 				platform: platformSchema,
 				count: z.number().int().nonnegative(),
 				truncated: z.boolean(),
-				elements: z.array(
-					z.object({
-						type: z.string(),
-						label: z.string().optional(),
-						id: z.string().optional(),
-						value: z.string().optional(),
-						rect: rectSchema,
-						center: z.object({ x: z.number(), y: z.number() }),
-						flags: z.array(z.string()).optional(),
-					}),
-				),
+				elements: z.array(elementSchema),
 			}),
 			annotations: {
 				readOnlyHint: true,
@@ -1689,17 +1893,611 @@ export function createMobileServer(options: ServerOptions = {}): {
 		},
 		safe(async ({ device, query, limit }) => {
 			const target = parseOnlineDevice(device);
-			const all =
-				target.platform === "ios"
-					? parseIosElements(await useWda(target.target, () => wda.source()))
-					: parseAndroidElements(await android.uiTree(target.target));
-			const matched = filterElements(all, query);
+			const matched = filterElements(await readElements(target), query);
 			return jsonResult({
 				device,
 				platform: target.platform,
 				count: matched.length,
 				truncated: matched.length > limit,
 				elements: matched.slice(0, limit),
+			});
+		}),
+	);
+
+	const tapAt = async (
+		target: OnlineDevice,
+		action: "tap" | "double_tap" | "long_press",
+		x: number,
+		y: number,
+	): Promise<void> => {
+		if (target.platform === "ios")
+			await useWda(target.target, () => {
+				if (action === "double_tap") return wda.doubleTap(x, y);
+				if (action === "long_press") return wda.longPress(x, y, 1_000);
+				return wda.tap(x, y);
+			});
+		else if (action === "double_tap")
+			await android.doubleTap(target.target, x, y);
+		else if (action === "long_press")
+			await android.longPress(target.target, x, y, 1_000);
+		else await android.tap(target.target, x, y);
+	};
+
+	server.registerTool(
+		"mobile_tap_element",
+		{
+			title: "Tap Element By Text",
+			description:
+				"Find an on-screen element by label, identifier, value, or type (same matching as mobile_list_elements, exact matches first) and tap, double tap, or long press its center. More robust than coordinates; re-read the screen afterwards.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					query: z.string().min(1).max(200),
+					index: z
+						.number()
+						.int()
+						.min(0)
+						.max(999)
+						.default(0)
+						.describe("Which match to use when several elements match"),
+					action: z.enum(["tap", "double_tap", "long_press"]).default("tap"),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				action: z.string(),
+				matches: z.number().int().nonnegative(),
+				element: elementSchema,
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, query, index, action }) => {
+			const target = parseOnlineDevice(device);
+			const matched = filterElements(await readElements(target), query);
+			if (!matched.length)
+				throw new Error(
+					`No on-screen element matches "${query}". Call mobile_list_elements to see what is visible, or swipe to reveal it.`,
+				);
+			const element = matched[index];
+			if (!element)
+				throw new Error(
+					`Only ${matched.length} elements match "${query}"; index ${index} is out of range`,
+				);
+			await tapAt(target, action, element.center.x, element.center.y);
+			return jsonResult({
+				device,
+				action,
+				matches: matched.length,
+				element,
+			});
+		}),
+	);
+
+	server.registerTool(
+		"mobile_double_tap",
+		{
+			title: "Double Tap Mobile Screen",
+			description:
+				"Double tap integer screen coordinates, for zoom, text selection, or double-tap gestures.",
+			inputSchema: z
+				.object({ device: deviceSchema, x: coordinate, y: coordinate })
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				doubleTapped: z.object({ x: z.number().int(), y: z.number().int() }),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, x, y }) => {
+			await tapAt(parseOnlineDevice(device), "double_tap", x, y);
+			return jsonResult({ device, doubleTapped: { x, y } });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_handle_alert",
+		{
+			title: "Handle iOS System Alert",
+			description:
+				"List, accept, or dismiss the visible iOS alert (permission prompts, app alerts). Pass button to press a specific label. Android dialogs are ordinary UI: use mobile_tap_element.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					action: z.enum(["list", "accept", "dismiss"]),
+					button: z.string().min(1).max(200).optional(),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				action: z.string(),
+				buttons: z.array(z.string()).optional(),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, action, button }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform !== "ios")
+				throw new Error(
+					"Android dialogs are ordinary UI; use mobile_tap_element with the button label",
+				);
+			if (action === "list") {
+				if (button) throw new Error("button is not used with action list");
+				const buttons = await useWda(target.target, () => wda.alertButtons());
+				return jsonResult({ device, action, buttons });
+			}
+			await useWda(target.target, () => wda.handleAlert(action, button));
+			return jsonResult({ device, action });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_dismiss_keyboard",
+		{
+			title: "Dismiss On-Screen Keyboard",
+			description:
+				"Hide the software keyboard so it stops covering the screen. Returns dismissed false on Android when no keyboard was shown.",
+			inputSchema: z.object({ device: deviceSchema }).strict(),
+			outputSchema: z.object({ device: z.string(), dismissed: z.boolean() }),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform === "ios") {
+				await useWda(target.target, () => wda.dismissKeyboard());
+				return jsonResult({ device, dismissed: true });
+			}
+			return jsonResult({
+				device,
+				dismissed: await android.dismissKeyboard(target.target),
+			});
+		}),
+	);
+
+	server.registerTool(
+		"mobile_set_lock",
+		{
+			title: "Lock Or Unlock Screen",
+			description:
+				"Lock or unlock the device screen and return the resulting lock state. Android unlock works only without a PIN, pattern, or password.",
+			inputSchema: z
+				.object({ device: deviceSchema, locked: z.boolean() })
+				.strict(),
+			outputSchema: z.object({ device: z.string(), locked: z.boolean() }),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, locked }) => {
+			const target = parseOnlineDevice(device);
+			const state =
+				target.platform === "ios"
+					? await useWda(target.target, () => wda.setLocked(locked))
+					: await android.setLocked(target.target, locked);
+			if (state !== locked)
+				throw new Error(
+					`Device is still ${state ? "locked" : "unlocked"}${state ? "; a PIN or pattern may be set" : ""}`,
+				);
+			return jsonResult({ device, locked: state });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_simulate_biometric",
+		{
+			title: "Simulate iOS Face ID Or Touch ID",
+			description:
+				"Enroll or unenroll Simulator biometrics, or deliver a matching or failing Face ID/Touch ID scan while the app is prompting. Needs Xcode 27. Use mobile_fingerprint on Android.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					action: z.enum(["enroll", "unenroll", "match", "fail"]),
+				})
+				.strict(),
+			outputSchema: z.object({ device: z.string(), action: z.string() }),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, action }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform !== "ios")
+				throw new Error("Use mobile_fingerprint for Android Emulators");
+			await ios.setBiometric(target.target, action);
+			return jsonResult({ device, action });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_record_screen",
+		{
+			title: "Record Screen Video",
+			description:
+				"Record the screen for a fixed duration to a new .mp4 file beneath MOBILE_MCP_APP_ROOT. The call blocks for the duration, so start it and then interact from another call only if your client runs tools concurrently.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					path: z.string().min(1).max(2_048),
+					durationSeconds: z.number().int().min(1).max(180).default(10),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				path: z.string(),
+				bytes: z.number().int().nonnegative(),
+				durationSeconds: z.number().int(),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, path, durationSeconds }) => {
+			const target = parseOnlineDevice(device);
+			const output = await validateOutputPath(path, ".mp4");
+			if (target.platform === "ios")
+				await ios.recordVideo(target.target, output, durationSeconds);
+			else await android.recordScreen(target.target, output, durationSeconds);
+			const { size } = await stat(output);
+			return jsonResult({ device, path: output, bytes: size, durationSeconds });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_get_crash_logs",
+		{
+			title: "Get App Crash Logs",
+			description:
+				"Return recent crash reports for one app: Android crash-buffer entries for its UID; iOS Simulator .ips reports summarized to exception and faulting-thread frames.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					appId: appIdSchema,
+					sinceMinutes: z.number().int().min(1).max(1_440).default(60),
+					maxLines: z.number().int().min(1).max(5_000).default(2_000),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				appId: z.string(),
+				platform: platformSchema,
+				found: z.boolean(),
+				logs: z.string(),
+				truncated: z.boolean(),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, appId, sinceMinutes, maxLines }) => {
+			const target = parseOnlineDevice(device);
+			const checkedAppId = validateAppIdentifier(target.platform, appId);
+			const logs =
+				target.platform === "ios"
+					? tailLines(
+							(
+								await ios.crashReports(target.target, checkedAppId, sinceMinutes)
+							).join("\n\n"),
+							maxLines,
+						)
+					: await android.getLogs(
+							target.target,
+							checkedAppId,
+							sinceMinutes,
+							maxLines,
+							true,
+						);
+			const limited = truncate(logs);
+			return jsonResult({
+				device,
+				appId: checkedAppId,
+				platform: target.platform,
+				found: logs.trim().length > 0,
+				logs: limited.value,
+				truncated: limited.truncated,
+			});
+		}),
+	);
+
+	server.registerTool(
+		"mobile_accessibility_audit",
+		{
+			title: "Run iOS Accessibility Audit",
+			description:
+				"Run Apple's XCTest accessibility audit (iOS 17+) on the foreground app and list issues such as low contrast, clipped text, missing labels, or small hit regions. Android has no command-line audit.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					auditTypes: z
+						.array(
+							z.enum(
+								Object.keys(AUDIT_TYPES) as [
+									keyof typeof AUDIT_TYPES,
+									...(keyof typeof AUDIT_TYPES)[],
+								],
+							),
+						)
+						.max(9)
+						.optional()
+						.describe("Defaults to all audit types"),
+					limit: z.number().int().min(1).max(500).default(100),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				count: z.number().int().nonnegative(),
+				truncated: z.boolean(),
+				issues: z.array(
+					z.object({
+						auditType: z.string(),
+						description: z.string(),
+						detail: z.string().optional(),
+						element: z
+							.object({
+								type: z.string().optional(),
+								label: z.string().optional(),
+								rect: z.unknown().optional(),
+							})
+							.optional(),
+					}),
+				),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, auditTypes, limit }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform !== "ios")
+				throw new Error(
+					"Android has no command-line accessibility audit; use mobile_list_elements to check labels",
+				);
+			const issues = await useWda(target.target, () =>
+				wda.accessibilityAudit(
+					(auditTypes ?? []).map((name) => AUDIT_TYPES[name]),
+				),
+			);
+			return jsonResult({
+				device,
+				count: issues.length,
+				truncated: issues.length > limit,
+				issues: issues.slice(0, limit),
+			});
+		}),
+	);
+
+	server.registerTool(
+		"mobile_keychain",
+		{
+			title: "Manage iOS Simulator Keychain",
+			description:
+				"Add a trusted root certificate (for HTTPS debugging proxies), add a certificate, or reset the iOS Simulator keychain. Certificate paths are confined beneath MOBILE_MCP_APP_ROOT.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					action: z.enum(["add-root-cert", "add-cert", "reset"]),
+					path: z.string().min(1).max(2_048).optional(),
+				})
+				.strict(),
+			outputSchema: z.object({ device: z.string(), action: z.string() }),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, action, path }) => {
+			const target = parseOnlineDevice(device);
+			if (target.platform !== "ios")
+				throw new Error(
+					"mobile_keychain supports iOS Simulators only; use mobile_set_proxy for Android traffic",
+				);
+			if (action === "reset") {
+				if (path) throw new Error("reset does not take a path");
+				await ios.keychain(target.target, action);
+			} else {
+				if (!path) throw new Error(`${action} requires a certificate path`);
+				await ios.keychain(
+					target.target,
+					action,
+					await validateCertificatePath(path),
+				);
+			}
+			return jsonResult({ device, action });
+		}),
+	);
+
+	const androidOnly = (device: string, tool: string): string => {
+		const target = parseOnlineDevice(device);
+		if (target.platform !== "android")
+			throw new Error(`${tool} supports Android Emulators only`);
+		return target.target;
+	};
+
+	server.registerTool(
+		"mobile_emulator_snapshot",
+		{
+			title: "Manage Android Emulator Snapshots",
+			description:
+				"List, save, load, or delete Android Emulator state snapshots, to reset a test to a known device state in seconds. load replaces the current device state.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					action: z.enum(["list", "save", "load", "delete"]),
+					name: z.string().regex(SNAPSHOT_NAME).optional(),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				action: z.string(),
+				name: z.string().optional(),
+				snapshots: z.array(z.string()).optional(),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, action, name }) => {
+			const serial = androidOnly(device, "mobile_emulator_snapshot");
+			if (action === "list") {
+				return jsonResult({
+					device,
+					action,
+					snapshots: await android.listSnapshots(serial),
+				});
+			}
+			if (!name) throw new Error(`${action} requires a snapshot name`);
+			await android.snapshot(serial, action, name);
+			return jsonResult({ device, action, name });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_phone_call",
+		{
+			title: "Simulate Android Phone Call",
+			description:
+				"Place a simulated inbound call, or accept, hold, reject as busy, or end a call on an Android Emulator, to test call interruptions.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					action: z.enum(["call", "accept", "hold", "busy", "cancel"]),
+					phoneNumber: phoneNumberSchema,
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				action: z.string(),
+				phoneNumber: z.string(),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, action, phoneNumber }) => {
+			await android.phoneCall(
+				androidOnly(device, "mobile_phone_call"),
+				action,
+				phoneNumber,
+			);
+			return jsonResult({ device, action, phoneNumber });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_set_sensor",
+		{
+			title: "Set Android Emulator Sensor",
+			description:
+				"Set a virtual sensor value on an Android Emulator: acceleration and gyroscope take x,y,z; proximity, light, temperature, pressure, and humidity take one value.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					sensor: z.enum(ANDROID_SENSORS),
+					values: z.array(z.number().min(-10_000).max(10_000)).min(1).max(3),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				sensor: z.string(),
+				values: z.array(z.number()),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, sensor, values }) => {
+			await android.setSensor(
+				androidOnly(device, "mobile_set_sensor"),
+				sensor,
+				values,
+			);
+			return jsonResult({ device, sensor, values });
+		}),
+	);
+
+	server.registerTool(
+		"mobile_set_proxy",
+		{
+			title: "Set Android Emulator HTTP Proxy",
+			description:
+				"Route all Android Emulator TCP traffic through an HTTP proxy, or clear it. The emulator process connects from the Mac, so use a host-side address such as 127.0.0.1:8888, not the guest alias 10.0.2.2. iOS Simulators use the host network; pair a Mac proxy with mobile_keychain add-root-cert.",
+			inputSchema: z.discriminatedUnion("action", [
+				z
+					.object({
+						device: deviceSchema,
+						action: z.literal("set"),
+						proxy: z
+							.string()
+							.regex(PROXY)
+							.describe("Mac-side host:port, for example 127.0.0.1:8888"),
+					})
+					.strict(),
+				z.object({ device: deviceSchema, action: z.literal("clear") }).strict(),
+			]),
+			outputSchema: z.object({
+				device: z.string(),
+				action: z.string(),
+				proxy: z.string().optional(),
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async (args) => {
+			const serial = androidOnly(args.device, "mobile_set_proxy");
+			const proxy = args.action === "set" ? args.proxy : undefined;
+			await android.setProxy(serial, proxy);
+			return jsonResult({
+				device: args.device,
+				action: args.action,
+				...(proxy ? { proxy } : {}),
 			});
 		}),
 	);

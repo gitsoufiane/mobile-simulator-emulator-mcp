@@ -172,16 +172,30 @@ export function parseIosElements(tree: unknown): UiElement[] {
 	return found;
 }
 
-/** Case-insensitive substring match over label, id, value, and type. */
+/**
+ * Case-insensitive substring match over label, id, value, and type. Exact
+ * label/id/value matches come first so "OK" prefers a button named "OK"
+ * over one named "Look".
+ */
 export function filterElements(
 	elements: UiElement[],
 	query: string | undefined,
 ): UiElement[] {
 	const needle = query?.trim().toLowerCase();
 	if (!needle) return elements;
-	return elements.filter((entry) =>
-		[entry.label, entry.id, entry.value, entry.type].some((field) =>
-			field?.toLowerCase().includes(needle),
-		),
+	const fields = (entry: UiElement) =>
+		[entry.label, entry.id, entry.value, entry.type].map((field) =>
+			field?.toLowerCase(),
+		);
+	const matched = elements.filter((entry) =>
+		fields(entry).some((field) => field?.includes(needle)),
 	);
+	const exact = (entry: UiElement) =>
+		fields(entry)
+			.slice(0, 3)
+			.some((field) => field === needle);
+	return [
+		...matched.filter(exact),
+		...matched.filter((entry) => !exact(entry)),
+	];
 }

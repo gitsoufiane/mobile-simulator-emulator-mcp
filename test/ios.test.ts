@@ -6,6 +6,7 @@ import {
 	parseIosApps,
 	parseIosDevices,
 	parseIosExecutable,
+	summarizeIosCrash,
 	type SimctlList,
 } from "../src/ios.js";
 
@@ -95,4 +96,41 @@ test("lists only available iOS simulator runtimes", () => {
 			version: "26.3",
 		},
 	]);
+});
+
+test("summarizes only crash reports from the requested app and Simulator", () => {
+	// Shape of ~/Library/Logs/DiagnosticReports/*.ips v2: JSON header line + JSON body.
+	const udid = "A8627257-2D08-47F0-A65B-C17F017A71CD";
+	const report = (bundleID: string, device: string) =>
+		`${JSON.stringify({ bundleID, name: "Example", app_version: "1.2", timestamp: "2026-09-27 17:56:14.00 -0700", is_simulated: 1 })}\n${JSON.stringify(
+			{
+				coalitionName: `com.apple.CoreSimulator.SimDevice.${device}`,
+				exception: { type: "EXC_CRASH", signal: "SIGABRT" },
+				termination: { namespace: "SIGNAL", indicator: "Abort trap: 6" },
+				faultingThread: 1,
+				usedImages: [{ name: "libsystem_kernel.dylib" }, { name: "Example" }],
+				threads: [
+					{ frames: [] },
+					{
+						frames: [
+							{ imageIndex: 0, symbol: "__pthread_kill" },
+							{ imageIndex: 1, imageOffset: 4242 },
+						],
+					},
+				],
+			},
+		)}`;
+
+	const summary = summarizeIosCrash(report("com.example.app", udid), "com.example.app", udid);
+	assert.ok(summary);
+	assert.match(summary, /EXC_CRASH SIGABRT/u);
+	assert.match(summary, /Termination: SIGNAL Abort trap: 6/u);
+	assert.match(summary, /0 __pthread_kill \(libsystem_kernel\.dylib\)/u);
+	assert.match(summary, /1 \+4242 \(Example\)/u);
+	assert.equal(summarizeIosCrash(report("com.other.app", udid), "com.example.app", udid), undefined);
+	assert.equal(
+		summarizeIosCrash(report("com.example.app", "D6B004BB-D816-4CE4-A043-705FB97867C3"), "com.example.app", udid),
+		undefined,
+	);
+	assert.equal(summarizeIosCrash("Incident Identifier: legacy text", "com.example.app", udid), undefined);
 });

@@ -1,8 +1,86 @@
+import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
-import { readFile, unlink, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
+import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CommandError, run, tailLines } from "./exec.js";
+
+export type IosBiometricAction = "enroll" | "unenroll" | "match" | "fail";
+export type IosOrientation =
+	| "portrait"
+	| "landscape"
+	| "landscape-right"
+	| "portrait-upside-down";
+
+/** `devicectl device orientation set` names. */
+const DEVICECTL_ORIENTATIONS: Record<IosOrientation, string> = {
+	portrait: "portrait",
+	landscape: "landscapeLeft",
+	"landscape-right": "landscapeRight",
+	"portrait-upside-down": "portraitUpsideDown",
+};
+
+const CRASH_FRAME_LIMIT = 25;
+
+/**
+ * Summarizes one `.ips` crash report if it belongs to `bundleId` on the
+ * Simulator `udid`. Simulator crashes land in the host DiagnosticReports
+ * folder; `coalitionName` is the only field that names the Simulator.
+ */
+export function summarizeIosCrash(
+	text: string,
+	bundleId: string,
+	udid: string,
+): string | undefined {
+	const newline = text.indexOf("\n");
+	if (newline === -1) return undefined;
+	let header: Record<string, unknown>;
+	let body: Record<string, unknown>;
+	try {
+		header = JSON.parse(text.slice(0, newline)) as Record<string, unknown>;
+		body = JSON.parse(text.slice(newline + 1)) as Record<string, unknown>;
+	} catch {
+		// Not an .ips v2 JSON report (older text format); it cannot be attributed.
+		return undefined;
+	}
+	if (
+		header.bundleID !== bundleId ||
+		body.coalitionName !== `com.apple.CoreSimulator.SimDevice.${udid}`
+	)
+		return undefined;
+	const exception = (body.exception ?? {}) as Record<string, unknown>;
+	const termination = (body.termination ?? {}) as Record<string, unknown>;
+	const images = Array.isArray(body.usedImages)
+		? (body.usedImages as Array<{ name?: unknown }>)
+		: [];
+	const threads = Array.isArray(body.threads)
+		? (body.threads as Array<{ frames?: unknown }>)
+		: [];
+	const faulting =
+		typeof body.faultingThread === "number" ? body.faultingThread : 0;
+	const frames = Array.isArray(threads[faulting]?.frames)
+		? (threads[faulting].frames as Array<Record<string, unknown>>)
+		: [];
+	const lines = [
+		`${String(header.timestamp ?? "unknown time")} ${String(header.name ?? bundleId)} ${String(header.app_version ?? "")}`.trim(),
+		`Exception: ${[exception.type, exception.signal, exception.subtype].filter(Boolean).join(" ")}`,
+		...(exception.message ? [`Message: ${String(exception.message)}`] : []),
+		...(termination.indicator || termination.namespace
+			? [
+					`Termination: ${[termination.namespace, termination.indicator].filter(Boolean).join(" ")}`,
+				]
+			: []),
+		`Faulting thread ${faulting}:`,
+		...frames.slice(0, CRASH_FRAME_LIMIT).map((frame, index) => {
+			const image =
+				typeof frame.imageIndex === "number"
+					? images[frame.imageIndex]?.name
+					: undefined;
+			return `  ${index} ${String(frame.symbol ?? `+${String(frame.imageOffset ?? "?")}`)} (${String(image ?? "?")})`;
+		}),
+	];
+	return lines.join("\n");
+}
 
 export interface SimctlDevice {
 	udid: string;
@@ -150,13 +228,208 @@ export class IosController {
 		await this.simctl(["install", udid, appPath], 120_000);
 	}
 
-	async launch(udid: string, bundleId: string): Promise<void> {
-		await this.simctl([
-			"launch",
-			"--terminate-running-process",
-			udid,
-			bundleId,
+	async launch(
+		udid: string,
+		bundleId: string,
+		options: {
+			arguments?: readonly string[];
+			environment?: Record<string, string>;
+			locale?: string;
+		} = {},
+	): Promise<void> {
+		// Foundation reads these argument-domain defaults for per-launch language.
+		const localeArgs = options.locale
+			? [
+					"-AppleLanguages",
+					`(${options.locale.replaceAll("_", "-")})`,
+					"-AppleLocale",
+					options.locale.replaceAll("-", "_"),
+				]
+			: [];
+		// simctl forwards SIMCTL_CHILD_<NAME> host variables to the launched app.
+		const childEnv = Object.fromEntries(
+			Object.entries(options.environment ?? {}).map(([key, value]) => [
+				`SIMCTL_CHILD_${key}`,
+				value,
+			]),
+		);
+		await run(
+			"xcrun",
+			[
+				"simctl",
+				"launch",
+				"--terminate-running-process",
+				udid,
+				bundleId,
+				...localeArgs,
+				...(options.arguments ?? []),
+			],
+			{ env: { ...process.env, ...childEnv } },
+		);
+	}
+
+	/** CoreDevice control; Xcode 27 `devicectl` also drives Simulators. */
+	private async devicectl(udid: string, args: readonly string[]): Promise<void> {
+		try {
+			await run("xcrun", ["devicectl", ...args, "--device", udid], {
+				timeoutMs: 60_000,
+			});
+		} catch (error) {
+			if (
+				error instanceof CommandError &&
+				/unexpected argument|not a valid|unknown (sub)?command/iu.test(
+					error.stderr + error.stdout,
+				)
+			)
+				throw new Error(
+					`This control needs Xcode 27 or newer (xcrun devicectl ${args.slice(0, 3).join(" ")}); ${error.message}`,
+				);
+			throw error;
+		}
+	}
+
+	async setBiometric(udid: string, action: IosBiometricAction): Promise<void> {
+		const args = {
+			enroll: ["device", "settings", "biometrics", "--enable"],
+			unenroll: ["device", "settings", "biometrics", "--disable"],
+			match: ["device", "simulate", "biometrics", "--success"],
+			fail: ["device", "simulate", "biometrics", "--failure"],
+		}[action];
+		await this.devicectl(udid, args);
+	}
+
+	async setOrientation(udid: string, orientation: IosOrientation): Promise<void> {
+		await this.devicectl(udid, [
+			"device",
+			"orientation",
+			"set",
+			DEVICECTL_ORIENTATIONS[orientation],
 		]);
+	}
+
+	async setMotionAndTransparency(
+		udid: string,
+		settings: { reduceMotion?: boolean; reduceTransparency?: boolean },
+	): Promise<void> {
+		const onOff = (value: boolean) => (value ? "on" : "off");
+		await this.devicectl(udid, [
+			"device",
+			"settings",
+			"appearance",
+			...(settings.reduceMotion === undefined
+				? []
+				: ["--reduce-motion", onOff(settings.reduceMotion)]),
+			...(settings.reduceTransparency === undefined
+				? []
+				: ["--reduce-transparency", onOff(settings.reduceTransparency)]),
+		]);
+	}
+
+	async setVoiceOver(udid: string, enabled: boolean): Promise<void> {
+		await this.devicectl(udid, [
+			"device",
+			"settings",
+			"voiceover",
+			enabled ? "--enable" : "--disable",
+		]);
+	}
+
+	async startLocationRoute(
+		udid: string,
+		waypoints: ReadonlyArray<{ latitude: number; longitude: number }>,
+		speedMetersPerSecond: number,
+	): Promise<void> {
+		await this.simctl([
+			"location",
+			udid,
+			"start",
+			`--speed=${speedMetersPerSecond}`,
+			...waypoints.map(({ latitude, longitude }) => `${latitude},${longitude}`),
+		]);
+	}
+
+	async keychain(
+		udid: string,
+		action: "add-root-cert" | "add-cert" | "reset",
+		certificatePath?: string,
+	): Promise<void> {
+		await this.simctl([
+			"keychain",
+			udid,
+			action,
+			...(certificatePath ? [certificatePath] : []),
+		]);
+	}
+
+	/** simctl records until SIGINT; it then finalizes the file and exits 0. */
+	async recordVideo(
+		udid: string,
+		outputPath: string,
+		seconds: number,
+	): Promise<void> {
+		const child = spawn(
+			"xcrun",
+			["simctl", "io", udid, "recordVideo", "--codec=h264", outputPath],
+			{ stdio: ["ignore", "ignore", "pipe"] },
+		);
+		let stderr = "";
+		const exited = new Promise<number | null>((resolve, reject) => {
+			child.once("error", reject);
+			child.once("close", resolve);
+		});
+		const started = new Promise<void>((resolve) => {
+			child.stderr.on("data", (chunk: Buffer) => {
+				if (stderr.length < 10_000) stderr += chunk.toString();
+				if (stderr.includes("Recording started")) resolve();
+			});
+		});
+		const startTimeout = setTimeout(() => child.kill("SIGKILL"), 30_000);
+		try {
+			const first = await Promise.race([started.then(() => "started"), exited]);
+			if (first !== "started")
+				throw new Error(`simctl recordVideo did not start: ${stderr.trim()}`);
+			clearTimeout(startTimeout);
+			await new Promise((resolve) => setTimeout(resolve, seconds * 1_000));
+			child.kill("SIGINT");
+			const code = await exited;
+			if (code !== 0)
+				throw new Error(`simctl recordVideo exited with ${String(code)}: ${stderr.trim()}`);
+		} finally {
+			clearTimeout(startTimeout);
+			if (child.exitCode === null) child.kill("SIGKILL");
+		}
+	}
+
+	async crashReports(
+		udid: string,
+		bundleId: string,
+		sinceMinutes: number,
+	): Promise<string[]> {
+		const folder = join(homedir(), "Library", "Logs", "DiagnosticReports");
+		const since = Date.now() - sinceMinutes * 60_000;
+		const names = await readdir(folder).catch((error: unknown) => {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
+		});
+		const recent = (
+			await Promise.all(
+				names
+					.filter((name) => name.endsWith(".ips"))
+					.map(async (name) => {
+						const path = join(folder, name);
+						const { mtimeMs } = await stat(path);
+						return { path, mtimeMs };
+					}),
+			)
+		)
+			.filter(({ mtimeMs }) => mtimeMs >= since)
+			.sort((left, right) => right.mtimeMs - left.mtimeMs);
+		const summaries = await Promise.all(
+			recent.map(async ({ path }) =>
+				summarizeIosCrash(await readFile(path, "utf8"), bundleId, udid),
+			),
+		);
+		return summaries.filter((summary): summary is string => Boolean(summary));
 	}
 
 	async terminate(udid: string, bundleId: string): Promise<void> {

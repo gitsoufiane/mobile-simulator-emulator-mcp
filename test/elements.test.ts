@@ -115,3 +115,18 @@ test("filters elements by label, id, value, or type", () => {
 	assert.equal(filterElements(elements, "switch").length, 1);
 	assert.equal(filterElements(elements, undefined).length, 2);
 });
+
+test("ranks exact label matches before substring matches", () => {
+	const elements = parseIosElements({
+		type: "Other",
+		rect: { x: 0, y: 0, width: 10, height: 10 },
+		children: [
+			{ type: "Button", label: "Look", rect: { x: 0, y: 0, width: 10, height: 10 } },
+			{ type: "Button", label: "OK", rect: { x: 0, y: 20, width: 10, height: 10 } },
+		],
+	});
+	assert.deepEqual(
+		filterElements(elements, "ok").map((entry) => entry.label),
+		["OK", "Look"],
+	);
+});

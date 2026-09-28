@@ -54,6 +54,20 @@ Build a local MCP server that lets an agent discover and control Apple iOS Simul
 37. `mobile_add_media`
 38. `mobile_set_orientation`
 39. `mobile_list_elements`
+40. `mobile_tap_element`
+41. `mobile_double_tap`
+42. `mobile_handle_alert`
+43. `mobile_dismiss_keyboard`
+44. `mobile_set_lock`
+45. `mobile_simulate_biometric`
+46. `mobile_record_screen`
+47. `mobile_get_crash_logs`
+48. `mobile_accessibility_audit`
+49. `mobile_keychain`
+50. `mobile_emulator_snapshot`
+51. `mobile_phone_call`
+52. `mobile_set_sensor`
+53. `mobile_set_proxy`
 
 ## Safety boundaries
 
@@ -67,8 +81,10 @@ Build a local MCP server that lets an agent discover and control Apple iOS Simul
 - Curated destructive operations execute without per-call confirmation; the local MCP client configuration is the trust boundary.
 - App reset/uninstall and iOS Simulator erase are supported. Android online AVD wipe, device creation/deletion, real devices, video recording, and device farms are out of scope.
 - Raw ADB/simctl argument passthrough remains forbidden.
-- iOS network conditioning and biometric events remain out of scope because Apple provides no supported `simctl` command for them.
-- Simulator keychain, app-container paths, iCloud sync, and device create/clone/delete/rename remain out of scope: they leak host paths or manage fleets rather than drive a running device.
+- iOS network conditioning remains out of scope because Apple provides no supported command for it. Face ID/Touch ID, orientation, reduce motion/transparency, and VoiceOver use Xcode 27 `devicectl`, which drives Simulators.
+- Simulator keychain control is limited to adding certificates confined beneath `MOBILE_MCP_APP_ROOT` and resetting; screen recordings are bounded (<=180 s) and written only as new `.mp4` files beneath the same root.
+- App-container paths, iCloud sync, and device create/clone/delete/rename remain out of scope: they leak host paths or manage fleets rather than drive a running device.
+- Emulator console commands (`adb emu`) exit 0 with `KO:` on failure; the shared console helper converts that to an error.
 - MCP resources, prompts, and completions remain unimplemented; device state is too volatile to cache as a resource and every workflow maps cleanly to a tool call.
 - Native commands that exit 0 on failure (`uiautomator dump`, `adb exec-out cat`, `xcrun simctl spawn log show`) must have their output validated, never returned verbatim as a result.
 

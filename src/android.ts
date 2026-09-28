@@ -31,7 +31,29 @@ export const KEYCODES = {
 	DPAD_LEFT: "KEYCODE_DPAD_LEFT",
 	DPAD_RIGHT: "KEYCODE_DPAD_RIGHT",
 	DPAD_CENTER: "KEYCODE_DPAD_CENTER",
+	NOTIFICATIONS: "KEYCODE_NOTIFICATION",
 } as const satisfies Record<string, string>;
+
+/** `wm user-rotation lock <n>` values. */
+const ROTATIONS = {
+	portrait: "0",
+	landscape: "1",
+	"portrait-upside-down": "2",
+	"landscape-right": "3",
+} as const;
+export type AndroidOrientation = keyof typeof ROTATIONS | "auto";
+
+export const ANDROID_SENSORS = [
+	"acceleration",
+	"gyroscope",
+	"magnetic-field",
+	"orientation",
+	"temperature",
+	"proximity",
+	"light",
+	"pressure",
+	"humidity",
+] as const;
 
 export type AndroidKey = keyof typeof KEYCODES;
 
@@ -107,6 +129,26 @@ export function validateAndroidUiTree(
 	return tree;
 }
 
+/**
+ * `wm size` reports the unrotated panel; `cur=` in `dumpsys window displays`
+ * is the current logical size, which is what `input tap` coordinates use.
+ */
+export function parseAndroidDisplaySize(
+	displays: string,
+): { width: number; height: number } | undefined {
+	const match = /\bcur=(\d+)x(\d+)/u.exec(displays);
+	return match?.[1] && match[2]
+		? { width: Number(match[1]), height: Number(match[2]) }
+		: undefined;
+}
+
+export function parseAndroidSnapshots(stdout: string): string[] {
+	return stdout.split(/\r?\n/u).flatMap((line) => {
+		const tag = /^\S+\s+(\S+)\s+\S+\s+\d{4}-\d\d-\d\d\s/u.exec(line)?.[1];
+		return tag ? [tag] : [];
+	});
+}
+
 function safeMediaName(path: string): string {
 	const name = basename(path);
 	if (!/^[A-Za-z0-9._-]{1,128}$/u.test(name))
@@ -128,6 +170,21 @@ export class AndroidController {
 		maxBuffer = 2 * 1024 * 1024,
 	) {
 		return run(this.adb, ["-s", serial, ...args], { timeoutMs, maxBuffer });
+	}
+
+	/** The emulator console exits 0 and prints `KO: <reason>` on failure. */
+	private async emu(serial: string, args: readonly string[], timeoutMs = 30_000) {
+		const result = await this.command(serial, ["emu", ...args], timeoutMs);
+		const failure = /^KO:\s*(.*)$/mu.exec(result.stdout)?.[1];
+		if (failure !== undefined)
+			throw new Error(
+				`Emulator console rejected "${args.join(" ")}": ${failure.trim()}`,
+			);
+		return result;
+	}
+
+	private shell(serial: string, args: readonly string[], timeoutMs = 30_000) {
+		return this.command(serial, ["shell", ...args], timeoutMs);
 	}
 
 	async listAvds(): Promise<string[]> {
@@ -155,7 +212,7 @@ export class AndroidController {
 
 	private async avdName(serial: string): Promise<string | undefined> {
 		try {
-			const { stdout } = await this.command(serial, ["emu", "avd", "name"]);
+			const { stdout } = await this.emu(serial, ["avd", "name"]);
 			return stdout.split(/\r?\n/u)[0]?.trim() || undefined;
 		} catch {
 			// Optional metadata: keep the reachable emulator in discovery results.
@@ -273,7 +330,7 @@ export class AndroidController {
 			await Promise.race([this.waitForBoot(serial, timeoutMs), spawnFailure]);
 			return serial;
 		} catch (error) {
-			await this.command(serial, ["emu", "kill"], 5_000).catch(() => {
+			await this.emu(serial, ["kill"], 5_000).catch(() => {
 				child.kill("SIGTERM");
 			});
 			throw error;
@@ -304,14 +361,34 @@ export class AndroidController {
 	}
 
 	async shutdown(serial: string): Promise<void> {
-		await this.command(serial, ["emu", "kill"]);
+		await this.emu(serial, ["kill"]);
 	}
 
 	async install(serial: string, appPath: string): Promise<void> {
 		await this.command(serial, ["install", "-r", appPath], 120_000);
 	}
 
-	async launch(serial: string, packageName: string): Promise<void> {
+	async launch(
+		serial: string,
+		packageName: string,
+		options: { extras?: Record<string, string>; locale?: string } = {},
+	): Promise<void> {
+		if (options.locale)
+			// Per-app language (Android 13+); persists until changed again. An
+			// empty list restores the system language.
+			await this.shell(serial, [
+				"cmd",
+				"locale",
+				"set-app-locales",
+				packageName,
+				"--locales",
+				options.locale === "system" ? "''" : options.locale,
+			]);
+		const extras = Object.entries(options.extras ?? {});
+		if (extras.length) {
+			await this.launchWithExtras(serial, packageName, extras);
+			return;
+		}
 		const { stdout } = await this.command(serial, [
 			"shell",
 			"monkey",
@@ -323,6 +400,42 @@ export class AndroidController {
 		]);
 		if (!stdout.includes("Events injected: 1"))
 			throw new Error(`No launchable activity found for ${packageName}`);
+	}
+
+	/** `monkey` cannot pass intent extras, so resolve and start the activity. */
+	private async launchWithExtras(
+		serial: string,
+		packageName: string,
+		extras: Array<[string, string]>,
+	): Promise<void> {
+		const { stdout: resolved } = await this.shell(serial, [
+			"cmd",
+			"package",
+			"resolve-activity",
+			"--brief",
+			"-c",
+			"android.intent.category.LAUNCHER",
+			packageName,
+		]);
+		const component = resolved.trim().split(/\r?\n/u).at(-1)?.trim() ?? "";
+		if (!component.startsWith(`${packageName}/`))
+			throw new Error(`No launchable activity found for ${packageName}`);
+		const { stdout } = await this.shell(serial, [
+			"am",
+			"start",
+			"-W",
+			"-S",
+			"-n",
+			// Inner-class activities contain `$`, which the remote shell expands.
+			quoteAndroidShellArgument(component),
+			...extras.flatMap(([key, value]) => [
+				"--es",
+				key,
+				quoteAndroidShellArgument(value),
+			]),
+		]);
+		if (/^Error/mu.test(stdout))
+			throw new Error(`Android could not start ${component}: ${stdout.trim()}`);
 	}
 
 	async terminate(serial: string, packageName: string): Promise<void> {
@@ -340,11 +453,13 @@ export class AndroidController {
 			throw new Error(`Android did not clear data for ${packageName}`);
 	}
 
+	/** `crashOnly` reads the dedicated crash buffer (uncaught exceptions, native crashes). */
 	async getLogs(
 		serial: string,
 		packageName: string,
 		sinceMinutes: number,
 		maxLines: number,
+		crashOnly = false,
 	): Promise<string> {
 		const { stdout: packages } = await this.command(serial, [
 			"shell",
@@ -368,7 +483,16 @@ export class AndroidController {
 		// are the useful ones, so read the window and keep its tail.
 		const { stdout } = await this.command(
 			serial,
-			["logcat", "-d", "-T", since, `--uid=${uid}`, "-v", "threadtime"],
+			[
+				"logcat",
+				"-d",
+				...(crashOnly ? ["-b", "crash"] : []),
+				"-T",
+				since,
+				`--uid=${uid}`,
+				"-v",
+				"threadtime",
+			],
 			30_000,
 			32 * 1024 * 1024,
 		);
@@ -395,8 +519,7 @@ export class AndroidController {
 		latitude: number,
 		longitude: number,
 	): Promise<void> {
-		await this.command(serial, [
-			"emu",
+		await this.emu(serial, [
 			"geo",
 			"fix",
 			String(longitude),
@@ -413,11 +536,11 @@ export class AndroidController {
 		capacity: number,
 		charging: boolean,
 	): Promise<void> {
-		await this.command(serial, ["emu", "power", "capacity", String(capacity)]);
-		await this.command(serial, ["emu", "power", "ac", charging ? "on" : "off"]);
+		await this.emu(serial, ["power", "capacity", String(capacity)]);
+		await this.emu(serial, ["power", "ac", charging ? "on" : "off"]);
 		let status = "discharging";
 		if (charging) status = capacity === 100 ? "full" : "charging";
-		await this.command(serial, ["emu", "power", "status", status]);
+		await this.emu(serial, ["power", "status", status]);
 	}
 
 	async sendSms(
@@ -425,7 +548,7 @@ export class AndroidController {
 		phoneNumber: string,
 		text: string,
 	): Promise<void> {
-		await this.command(serial, ["emu", "sms", "send", phoneNumber, text]);
+		await this.emu(serial, ["sms", "send", phoneNumber, text]);
 	}
 
 	async fingerprint(
@@ -433,8 +556,7 @@ export class AndroidController {
 		action: "touch" | "remove",
 		fingerId?: number,
 	): Promise<void> {
-		await this.command(serial, [
-			"emu",
+		await this.emu(serial, [
 			"finger",
 			action,
 			...(action === "touch" ? [String(fingerId)] : []),
@@ -446,8 +568,8 @@ export class AndroidController {
 		speed: string,
 		delay: string,
 	): Promise<void> {
-		await this.command(serial, ["emu", "network", "speed", speed]);
-		await this.command(serial, ["emu", "network", "delay", delay]);
+		await this.emu(serial, ["network", "speed", speed]);
+		await this.emu(serial, ["network", "delay", delay]);
 	}
 
 	async setConnectivity(
@@ -474,7 +596,7 @@ export class AndroidController {
 	}
 
 	async rotate(serial: string): Promise<void> {
-		await this.command(serial, ["emu", "rotate"]);
+		await this.emu(serial, ["rotate"]);
 	}
 
 	async listApps(serial: string, includeSystem: boolean): Promise<MobileApp[]> {
@@ -645,6 +767,14 @@ export class AndroidController {
 	private async screenSize(
 		serial: string,
 	): Promise<{ width: number; height: number }> {
+		const { stdout: displays } = await this.command(
+			serial,
+			["shell", "dumpsys", "window", "displays"],
+			10_000,
+			8 * 1024 * 1024,
+		);
+		const current = parseAndroidDisplaySize(displays);
+		if (current) return current;
 		const { stdout } = await this.command(serial, ["shell", "wm", "size"]);
 		const matches = [
 			...stdout.matchAll(/(?:Physical|Override) size:\s*(\d+)x(\d+)/gu),
@@ -713,5 +843,158 @@ export class AndroidController {
 
 	async pressKey(serial: string, key: AndroidKey): Promise<void> {
 		await this.command(serial, ["shell", "input", "keyevent", KEYCODES[key]]);
+	}
+
+	async doubleTap(serial: string, x: number, y: number): Promise<void> {
+		await this.validatePoint(serial, x, y);
+		const tap = ["input", "tap", String(x), String(y)];
+		// One remote shell keeps both taps inside the system double-tap timeout.
+		await this.shell(serial, [...tap, ";", ...tap]);
+	}
+
+	async isLocked(serial: string): Promise<boolean> {
+		const [{ stdout: power }, { stdout: window }] = await Promise.all([
+			this.command(serial, ["shell", "dumpsys", "power"], 10_000, 8 * 1024 * 1024),
+			this.command(serial, ["shell", "dumpsys", "window"], 20_000, 8 * 1024 * 1024),
+		]);
+		return (
+			!/mWakefulness=Awake/u.test(power) ||
+			/isKeyguardShowing=true/u.test(window)
+		);
+	}
+
+	/** Unlock works for the default swipe keyguard; a PIN or pattern still blocks. */
+	async setLocked(serial: string, locked: boolean): Promise<boolean> {
+		if (locked) await this.shell(serial, ["input", "keyevent", "KEYCODE_SLEEP"]);
+		else {
+			await this.shell(serial, ["input", "keyevent", "KEYCODE_WAKEUP"]);
+			await this.shell(serial, ["wm", "dismiss-keyguard"]);
+		}
+		await sleep(1_000);
+		return this.isLocked(serial);
+	}
+
+	async dismissKeyboard(serial: string): Promise<boolean> {
+		const { stdout } = await this.command(
+			serial,
+			["shell", "dumpsys", "input_method"],
+			10_000,
+			8 * 1024 * 1024,
+		);
+		if (!/mInputShown=true/u.test(stdout)) return false;
+		await this.pressKey(serial, "BACK");
+		return true;
+	}
+
+	async setOrientation(
+		serial: string,
+		orientation: AndroidOrientation,
+	): Promise<void> {
+		await this.shell(
+			serial,
+			orientation === "auto"
+				? ["wm", "user-rotation", "free"]
+				: ["wm", "user-rotation", "lock", ROTATIONS[orientation]],
+		);
+	}
+
+	async recordScreen(
+		serial: string,
+		localPath: string,
+		seconds: number,
+	): Promise<void> {
+		const remote = `/sdcard/mobile-mcp-${Date.now()}.mp4`;
+		try {
+			await this.shell(
+				serial,
+				["screenrecord", "--time-limit", String(seconds), remote],
+				(seconds + 30) * 1_000,
+			);
+			await this.command(serial, ["pull", remote, localPath], 120_000);
+		} finally {
+			// safe to ignore: remote temp cleanup must not hide the recording result.
+			await this.shell(serial, ["rm", "-f", remote], 5_000).catch(() => undefined);
+		}
+	}
+
+	async snapshot(
+		serial: string,
+		action: "save" | "load" | "delete",
+		name: string,
+	): Promise<void> {
+		await this.emu(
+			serial,
+			["avd", "snapshot", action === "delete" ? "del" : action, name],
+			180_000,
+		);
+	}
+
+	async listSnapshots(serial: string): Promise<string[]> {
+		return parseAndroidSnapshots(
+			(await this.emu(serial, ["avd", "snapshot", "list"])).stdout,
+		);
+	}
+
+	async phoneCall(
+		serial: string,
+		action: "call" | "accept" | "cancel" | "busy" | "hold",
+		phoneNumber: string,
+	): Promise<void> {
+		await this.emu(serial, ["gsm", action, phoneNumber]);
+	}
+
+	async setSensor(
+		serial: string,
+		sensor: (typeof ANDROID_SENSORS)[number],
+		values: readonly number[],
+	): Promise<void> {
+		await this.emu(serial, ["sensor", "set", sensor, values.join(":")]);
+	}
+
+	async setProxy(serial: string, proxy: string | undefined): Promise<void> {
+		await this.emu(serial, proxy ? ["proxy", "set", proxy] : ["proxy", "clear"]);
+	}
+
+	/** Same three scales that Settings > Accessibility > Remove animations sets. */
+	async setReduceMotion(serial: string, enabled: boolean): Promise<void> {
+		for (const scale of [
+			"window_animation_scale",
+			"transition_animation_scale",
+			"animator_duration_scale",
+		])
+			await this.shell(serial, [
+				"settings",
+				"put",
+				"global",
+				scale,
+				enabled ? "0" : "1",
+			]);
+	}
+
+	async setTalkBack(serial: string, enabled: boolean): Promise<void> {
+		const service = "com.google.android.marvin.talkback/.TalkBackService";
+		if (enabled) {
+			const { stdout } = await this.shell(serial, [
+				"pm",
+				"path",
+				"com.google.android.marvin.talkback",
+			]);
+			if (!stdout.includes("package:"))
+				throw new Error("TalkBack is not installed on this emulator image");
+		}
+		// Deleting on disable restores the image default (unset), not "".
+		await this.shell(
+			serial,
+			enabled
+				? ["settings", "put", "secure", "enabled_accessibility_services", service]
+				: ["settings", "delete", "secure", "enabled_accessibility_services"],
+		);
+		await this.shell(serial, [
+			"settings",
+			"put",
+			"secure",
+			"accessibility_enabled",
+			enabled ? "1" : "0",
+		]);
 	}
 }

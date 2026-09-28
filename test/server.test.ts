@@ -26,7 +26,7 @@ after(async () => {
 test("lists the focused mobile tool surface", async () => {
 	const result = await client.listTools();
 	const names = result.tools.map((tool) => tool.name);
-	assert.equal(names.length, 39);
+	assert.equal(names.length, 53);
 	assert.deepEqual(names, [
 		"mobile_doctor",
 		"mobile_list_devices",
@@ -61,6 +61,20 @@ test("lists the focused mobile tool surface", async () => {
 		"mobile_take_screenshot",
 		"mobile_get_ui_tree",
 		"mobile_list_elements",
+		"mobile_tap_element",
+		"mobile_double_tap",
+		"mobile_handle_alert",
+		"mobile_dismiss_keyboard",
+		"mobile_set_lock",
+		"mobile_simulate_biometric",
+		"mobile_record_screen",
+		"mobile_get_crash_logs",
+		"mobile_accessibility_audit",
+		"mobile_keychain",
+		"mobile_emulator_snapshot",
+		"mobile_phone_call",
+		"mobile_set_sensor",
+		"mobile_set_proxy",
 		"mobile_get_screen_info",
 		"mobile_tap",
 		"mobile_long_press",
@@ -130,6 +144,35 @@ test("rejects invalid environment controls before native execution", async () =>
 	]);
 	assert.equal(battery.isError, true);
 	assert.equal(sms.isError, true);
+});
+
+test("rejects platform-mismatched and malformed inputs before native execution", async () => {
+	const ios = "ios:A8627257-2D08-47F0-A65B-C17F017A71CD";
+	const android = "android:emulator-5554";
+	const calls: Array<[string, Record<string, unknown>, RegExp]> = [
+		["mobile_launch_app", { device: ios, appId: "com.example.app", extras: { a: "b" } }, /Android-only/u],
+		["mobile_launch_app", { device: android, appId: "com.example.app", arguments: ["-x"] }, /iOS-only/u],
+		["mobile_launch_app", { device: ios, appId: "com.example.app", locale: "not a locale" }, /invalid|locale/iu],
+		["mobile_launch_app", { device: ios, appId: "com.example.app", environment: { "BAD-NAME": "x" } }, /invalid/iu],
+		["mobile_handle_alert", { device: android, action: "accept" }, /mobile_tap_element/u],
+		["mobile_simulate_biometric", { device: android, action: "match" }, /mobile_fingerprint/u],
+		["mobile_accessibility_audit", { device: android }, /Android has no/u],
+		["mobile_keychain", { device: android, action: "reset" }, /iOS Simulators only/u],
+		["mobile_emulator_snapshot", { device: ios, action: "list" }, /Android Emulators only/u],
+		["mobile_emulator_snapshot", { device: android, action: "save", name: "../x" }, /invalid/iu],
+		["mobile_set_proxy", { device: android, action: "set", proxy: "http://user:pw@host:80" }, /invalid/iu],
+		["mobile_set_sensor", { device: android, sensor: "bogus", values: [1] }, /invalid/iu],
+		["mobile_phone_call", { device: android, action: "call", phoneNumber: "555; rm" }, /invalid/iu],
+		["mobile_set_location", { device: android, action: "route", waypoints: [{ latitude: 1, longitude: 1 }] }, /invalid|too small|>=2/iu],
+		["mobile_set_orientation", { device: ios, orientation: "auto" }, /Android-only/u],
+		["mobile_record_screen", { device: android, path: "clip.mov" }, /\.mp4/u],
+		["mobile_tap_element", { device: android, query: "" }, /invalid|too small/iu],
+	];
+	for (const [name, args, expected] of calls) {
+		const result = await client.callTool({ name, arguments: args });
+		assert.equal(result.isError, true, `${name} ${JSON.stringify(args)} must fail`);
+		assert.match(JSON.stringify(result.content), expected, name);
+	}
 });
 
 test("rejects unknown input fields before executing a tool", async () => {

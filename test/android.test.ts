@@ -2,8 +2,10 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
 	KEYCODES,
+	parseAndroidDisplaySize,
 	parseAndroidForegroundApp,
 	parseAndroidPackages,
+	parseAndroidSnapshots,
 	validateAndroidUiTree,
 } from "../src/android.js";
 
@@ -85,4 +87,25 @@ test("maps every supported key to an Android keycode", () => {
 	}
 	assert.equal(KEYCODES.DELETE, "KEYCODE_DEL");
 	assert.equal(KEYCODES.APP_SWITCH, "KEYCODE_APP_SWITCH");
+});
+
+test("reads the rotated logical display size, not the physical panel", () => {
+	// `dumpsys window displays` while locked to landscape (user-rotation 1).
+	const displays =
+		"  Display: mDisplayId=0 rootTasks=1\n    init=1080x2424 420dpi base=1080x2424 cur=2424x1080 app=2424x1010 rng=1080x1010-2424x2354\n";
+	assert.deepEqual(parseAndroidDisplaySize(displays), {
+		width: 2424,
+		height: 1080,
+	});
+	assert.equal(parseAndroidDisplaySize("no display"), undefined);
+});
+
+test("lists emulator snapshot tags", () => {
+	const listing =
+		"List of snapshots present on all disks:\nID        TAG                 VM SIZE                DATE       VM CLOCK\n--        default_boot            72M 2026-09-10 13:20:05  367:07:58.218\n--        checkout_ready         80M 2026-09-27 18:01:00  001:02:03.000\nOK\n";
+	assert.deepEqual(parseAndroidSnapshots(listing), [
+		"default_boot",
+		"checkout_ready",
+	]);
+	assert.deepEqual(parseAndroidSnapshots("OK\n"), []);
 });

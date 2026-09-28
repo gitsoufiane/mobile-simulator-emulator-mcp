@@ -98,8 +98,14 @@ export class WdaController {
 				detail && typeof detail === "object" && "error" in detail
 					? String(detail.error)
 					: undefined;
+			// W3C errors carry {error, message, traceback}; the Objective-C
+			// traceback is noise for an agent, so report only code and message.
+			const message =
+				detail && typeof detail === "object" && "message" in detail
+					? `${code ?? "error"}: ${String(detail.message)}`
+					: JSON.stringify(detail ?? payload);
 			throw new WdaError(
-				`WebDriverAgent HTTP ${response.status}: ${JSON.stringify(detail ?? payload)}`,
+				`WebDriverAgent HTTP ${response.status} ${message}`,
 				response.status,
 				code,
 			);
@@ -313,6 +319,99 @@ export class WdaController {
 					],
 				}),
 			});
+		});
+	}
+
+	async doubleTap(x: number, y: number): Promise<void> {
+		await this.validatePoint(x, y);
+		await this.withSession(async (sessionPath) => {
+			await this.request(`${sessionPath}/wda/doubleTap`, {
+				method: "POST",
+				body: JSON.stringify({ x, y }),
+			});
+		});
+	}
+
+	/** Button labels of the visible alert, or [] when no alert is open. */
+	async alertButtons(): Promise<string[]> {
+		try {
+			const { value } = await this.withSession((sessionPath) =>
+				this.request(`${sessionPath}/wda/alert/buttons`),
+			);
+			return Array.isArray(value) ? value.map(String) : [];
+		} catch (error) {
+			if (error instanceof WdaError && error.code === "no such alert") return [];
+			throw error;
+		}
+	}
+
+	async handleAlert(
+		action: "accept" | "dismiss",
+		button?: string,
+	): Promise<void> {
+		await this.withSession(async (sessionPath) => {
+			await this.request(`${sessionPath}/alert/${action}`, {
+				method: "POST",
+				body: JSON.stringify(button ? { name: button } : {}),
+			});
+		});
+	}
+
+	async dismissKeyboard(): Promise<void> {
+		await this.withSession(async (sessionPath) => {
+			await this.request(`${sessionPath}/wda/keyboard/dismiss`, {
+				method: "POST",
+				body: JSON.stringify({}),
+			});
+		});
+	}
+
+	async setLocked(locked: boolean): Promise<boolean> {
+		await this.request(locked ? "/wda/lock" : "/wda/unlock", {
+			method: "POST",
+			body: JSON.stringify({}),
+		});
+		return (await this.request("/wda/locked")).value === true;
+	}
+
+	/** XCUIApplication.performAccessibilityAudit (iOS 17+) on the foreground app. */
+	async accessibilityAudit(auditTypes: readonly string[]): Promise<
+		Array<{
+			auditType: string;
+			description: string;
+			detail?: string;
+			element?: { type?: string; label?: string; rect?: unknown };
+		}>
+	> {
+		const { value } = await this.withSession((sessionPath) =>
+			this.request(`${sessionPath}/wda/performAccessibilityAudit`, {
+				method: "POST",
+				body: JSON.stringify(auditTypes.length ? { auditTypes } : {}),
+			}),
+		);
+		if (!Array.isArray(value))
+			throw new Error("WebDriverAgent returned an invalid accessibility audit");
+		return value.map((raw) => {
+			const issue = object(raw, "audit issue");
+			const attributes =
+				issue.elementAttributes && typeof issue.elementAttributes === "object"
+					? (issue.elementAttributes as Record<string, unknown>)
+					: {};
+			const text = (key: string) =>
+				typeof attributes[key] === "string" && attributes[key]
+					? { [key]: attributes[key] as string }
+					: {};
+			const detail = String(issue.detailedDescription ?? "");
+			return {
+				auditType: String(issue.auditType ?? "unknown"),
+				description: String(issue.compactDescription || detail),
+				...(detail ? { detail } : {}),
+				element: {
+					...text("type"),
+					...text("label"),
+					...(attributes.rect ? { rect: attributes.rect } : {}),
+				},
+			};
 		});
 	}
 

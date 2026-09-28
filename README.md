@@ -1,6 +1,6 @@
 # Mobile Simulator & Emulator MCP
 
-A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets coding agents inspect, control, and test Apple iOS Simulators and Google Android Emulators. It exposes 39 typed tools for device lifecycle, app discovery and management, UI automation, compact element lookup, screenshots, logs, permissions, location, appearance/accessibility, and platform-specific test conditions.
+A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets coding agents inspect, control, and test Apple iOS Simulators and Google Android Emulators. It exposes 53 typed tools for device lifecycle, app discovery and management, UI automation by element or coordinate, system alerts, screenshots and screen recording, logs and crash reports, permissions, location and routes, biometrics, lock state, locale, appearance/accessibility and accessibility audits, network proxies and certificates, emulator snapshots, calls, sensors, and other platform-specific test conditions.
 
 It defaults to stdio and can also serve Streamable HTTP on loopback with `--listen`.
 
@@ -164,14 +164,14 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | `mobile_boot_device` | Boot and wait for an iOS Simulator or Android AVD |
 | `mobile_shutdown_device` | Shut down a running target without deleting data |
 | `mobile_install_app` | Install `.app` or `.apk` artifacts from the active project root |
-| `mobile_launch_app` | Launch an app by bundle/package ID |
+| `mobile_launch_app` | Launch an app by bundle/package ID, optionally with a locale, iOS arguments/environment, or Android intent extras |
 | `mobile_terminate_app` | Stop an app without clearing data |
 | `mobile_list_apps` | List installed bundle IDs/package names (user apps by default) |
 | `mobile_get_foreground_app` | Report which app (and Android activity) is in front |
 | `mobile_get_logs` | Return bounded logs for one installed app |
 | `mobile_reset_app` | Clear Android app data or uninstall an iOS app |
 | `mobile_set_permission` | Grant/revoke Android runtime permissions or grant/revoke/reset allowlisted iOS privacy services |
-| `mobile_set_location` | Set simulated GPS coordinates; iOS also supports clearing the simulation |
+| `mobile_set_location` | Set simulated GPS coordinates; iOS also clears the simulation or moves along a waypoint route |
 | `mobile_send_push` | Send a ≤4096-byte APNs payload to an iOS Simulator app |
 | `mobile_add_media` | Add photos, videos, or vCard contacts to the device library |
 | `mobile_uninstall_app` | Uninstall an app and its data |
@@ -180,24 +180,38 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | `mobile_get_clipboard` | Read iOS Simulator pasteboard text |
 | `mobile_set_status_bar` | Override or clear typed iOS status-bar values |
 | `mobile_set_appearance` | Switch light/dark appearance on either platform |
-| `mobile_set_accessibility` | iOS Dynamic Type and contrast; Android font scale |
+| `mobile_set_accessibility` | Reduce motion and screen reader (VoiceOver/TalkBack) on both; iOS Dynamic Type, contrast, transparency; Android font scale |
 | `mobile_set_battery` | Set Android Emulator battery capacity and charging state |
 | `mobile_send_sms` | Deliver a simulated inbound Android SMS |
 | `mobile_fingerprint` | Touch/remove an enrolled Android Emulator fingerprint |
 | `mobile_set_network` | Set Android Emulator speed and latency profiles |
 | `mobile_set_connectivity` | Toggle Android Emulator airplane mode, wifi, or mobile data |
 | `mobile_rotate` | Rotate an Android Emulator clockwise |
-| `mobile_set_orientation` | Set an absolute iOS Simulator orientation |
+| `mobile_set_orientation` | Set an absolute orientation on either platform; Android `auto` restores sensor rotation |
 | `mobile_open_url` | Open an allowed URL or deep link |
 | `mobile_take_screenshot` | Return a PNG image directly to the client |
 | `mobile_get_ui_tree` | Return iOS JSON or Android XML UI hierarchy |
 | `mobile_list_elements` | Return compact labeled/interactive elements with tap-ready center coordinates |
+| `mobile_tap_element` | Tap, double tap, or long press an element found by label, identifier, value, or type |
+| `mobile_double_tap` | Double tap validated coordinates |
+| `mobile_handle_alert` | List, accept, or dismiss the visible iOS alert, optionally by button label |
+| `mobile_dismiss_keyboard` | Hide the software keyboard |
+| `mobile_set_lock` | Lock or unlock the screen and report the resulting state |
+| `mobile_simulate_biometric` | Enroll/unenroll iOS Face ID or Touch ID and deliver matching or failing scans (Xcode 27) |
+| `mobile_record_screen` | Record a fixed-length `.mp4` beneath the app root |
+| `mobile_get_crash_logs` | Return an app's Android crash buffer or summarized iOS Simulator crash reports |
+| `mobile_accessibility_audit` | Run Apple's XCTest accessibility audit on the foreground iOS app |
+| `mobile_keychain` | Add a root or regular certificate to, or reset, the iOS Simulator keychain |
+| `mobile_emulator_snapshot` | List, save, load, or delete Android Emulator snapshots |
+| `mobile_phone_call` | Simulate an inbound Android call and accept, hold, busy, or end it |
+| `mobile_set_sensor` | Set Android Emulator acceleration, gyroscope, light, proximity, and other sensors |
+| `mobile_set_proxy` | Set or clear the Android Emulator HTTP proxy |
 | `mobile_get_screen_info` | Return screen width, height, orientation, and density |
 | `mobile_tap` | Tap validated coordinates |
 | `mobile_long_press` | Press and hold validated coordinates |
 | `mobile_swipe` | Swipe between validated coordinates |
 | `mobile_type_text` | Type into the focused field |
-| `mobile_press_key` | Press HOME/BACK/ENTER/app-switch/volume keys as supported |
+| `mobile_press_key` | Press HOME/BACK/ENTER/app-switch/volume keys as supported; Android `NOTIFICATIONS` opens the shade |
 
 ## Device IDs
 
@@ -211,7 +225,7 @@ Always use IDs from the latest `mobile_list_devices` result.
 
 | Variable | Default | Meaning |
 |---|---|---|
-| `MOBILE_MCP_APP_ROOT` | MCP process working directory | Only `.app`/`.apk` paths beneath this directory may be installed |
+| `MOBILE_MCP_APP_ROOT` | MCP process working directory | Apps, media, and certificates are read, and recordings are written, only beneath this directory |
 | `MOBILE_MCP_URL_SCHEMES` | empty | Comma-separated extra deep-link schemes; `http` and `https` are always allowed |
 | `MOBILE_MCP_SHOW_XCODE_LOG` | `0` | Set to `1` for verbose Xcode/WDA diagnostics on stderr |
 | `ANDROID_SDK_ROOT` / `ANDROID_HOME` | executable lookup | Android SDK location |
@@ -223,7 +237,9 @@ Always use IDs from the latest `mobile_list_devices` result.
 - Native commands use argument arrays, explicit Android serials, timeouts, and output limits.
 - Physical devices, device creation/deletion, raw native-command passthrough, and arbitrary host shell access are not supported.
 - Curated destructive operations—including app reset/uninstall and iOS Simulator erase—execute without per-call confirmation. The MCP client configuration is the trust boundary.
-- URL schemes, device identifiers, app IDs, permissions, coordinates, environment profiles, durations, push payloads, and install paths are validated.
+- URL schemes, device identifiers, app IDs, permissions, coordinates, environment profiles, durations, push payloads, locales, launch environment names, intent-extra keys, proxy addresses, snapshot names, and file paths are validated.
+- Recordings are written only as new `.mp4` files inside an existing directory beneath `MOBILE_MCP_APP_ROOT`; existing files are never overwritten.
+- The Android emulator console reports failures as `KO:` with exit code 0. Every console call checks for it, so a rejected command is an error, never a silent success.
 - WebDriverAgent is contacted only at `127.0.0.1:8100`.
 
 Treat this server like any local developer tool: it runs with the MCP client's operating-system permissions and can interact with apps displayed in test devices.
@@ -233,18 +249,25 @@ Treat this server like any local developer tool: it runs with the MCP client's o
 - One iOS Simulator can own the WDA process on port 8100 at a time, across all stdio or HTTP sessions of one server process. Android can run concurrently.
 - `mobile_list_elements` keeps elements that have a label, identifier, or value, or that are interactive. Layout containers and iOS keyboard keys are omitted; use `mobile_get_ui_tree` when you need them.
 - `mobile_get_ui_tree` and Android input need the screen on and unlocked. A sleeping Android Emulator makes `uiautomator dump` fail, and the server reports that as an error rather than returning an empty tree.
-- `mobile_set_accessibility` splits by platform: `contentSize`/`increaseContrast` are iOS-only, `fontScale` is Android-only.
+- `mobile_set_accessibility` splits by platform: `contentSize`/`increaseContrast`/`reduceTransparency` are iOS-only, `fontScale` is Android-only. `reduceMotion` and `screenReader` work on both; on iOS they need Xcode 27 `devicectl`, and Android TalkBack must be installed in the emulator image.
+- Android `mobile_set_orientation` locks rotation; pass `auto` to restore sensor rotation. iOS uses `devicectl` on Xcode 27 (works on the portrait-only home screen) and falls back to WebDriverAgent on older Xcode.
+- `mobile_record_screen` blocks for its duration (1–180 s). Android `screenrecord` has no audio.
+- `mobile_get_crash_logs` on iOS reads `~/Library/Logs/DiagnosticReports` and keeps only reports whose `coalitionName` names the target Simulator.
+- The Android proxy is applied by the emulator process on the Mac, so use a Mac-side address such as `127.0.0.1:8888`, not the guest alias `10.0.2.2`.
+- Android `mobile_set_lock` unlock dismisses only the default swipe keyguard; a PIN, pattern, or password stays locked and the tool reports an error.
+- Android per-app locale (`mobile_launch_app` `locale`) needs Android 13+ and persists until you launch with `locale: "system"`.
 - `mobile_list_apps` returns Android package names without display labels; iOS returns `CFBundleDisplayName` when the app declares one.
 - Android `input text` supports printable ASCII only. iOS typing supports Unicode through WDA.
 - UI trees depend on apps exposing useful accessibility labels/identifiers.
 - Trees and logs over one million characters return `truncated: true`; treat the result as incomplete.
 - Android Emulator has no official command to clear its last GPS fix; the release gate restores it to `0,0`.
 - Android AVD wipe is a boot-time option, so `mobile_erase_device` is iOS-only.
-- Clipboard and cosmetic status-bar control are iOS-only in the installed official CLIs. SMS, fingerprint, network profiles, battery state, and rotation are Android-only.
+- Clipboard, cosmetic status-bar control, alerts, Face ID/Touch ID, keychain, accessibility audits, and location routes are iOS-only in the installed official tools. SMS, fingerprint, network profiles, battery state, snapshots, calls, sensors, proxy, and `mobile_rotate` are Android-only.
+- Android clipboard: the platform has no shell clipboard command (`cmd clipboard` reports no implementation), so clipboard stays iOS-only.
 - Simulated push delivery is iOS-only. Android FCM requires Firebase rather than `adb`.
-- Apple exposes no supported `simctl` command for network conditioning or Face ID/Touch ID events; those remain out of scope.
-- Video recording remains out of scope because it requires a long-running stream lifecycle and artifact storage policy.
-- Simulator keychain manipulation, app-container host paths, iCloud sync, and device create/clone/delete/rename stay out of scope: they leak host paths or manage fleets rather than test a running device.
+- Apple exposes no supported command for Simulator network conditioning; it remains out of scope.
+- App-container host paths, iCloud sync, and device create/clone/delete/rename stay out of scope: they leak host paths or manage fleets rather than test a running device.
+- Android foldable posture, multi-display, and screen-size overrides, plus iOS Siri, remain unimplemented.
 - MCP resources, prompts, and completions are not implemented. Device state changes too quickly to cache as resources, and every workflow here is better expressed as an explicit tool call.
 - Simulators and emulators do not reproduce all real-device sensors, performance, or hardware behavior.
 
@@ -277,8 +300,11 @@ npm run check
 npm run live
 npm run live:deep
 npm run live:tools
+npm run live:extended
 npm audit --omit=dev
 ```
+
+`npm run live:extended` exercises every 0.5.0 tool on both platforms against Settings and Safari and restores each change: locale, launch arguments/extras, element taps, keyboard, orientation (including a landscape tap beyond the portrait width), double tap, lock, recording, crash logs, snapshots, calls and console `KO:` errors, sensors, proxy, reduce motion, TalkBack/VoiceOver, the notification shade, Face ID, alerts, and the accessibility audit. `mobile_keychain` and alert accept change Simulator trust and permission state, so verify them on a throwaway Simulator (`xcrun simctl create`) instead.
 
 `npm run live:tools` covers the app-discovery, appearance, accessibility, screen-info, and long-press tools, and asserts that platform and coordinate rejections still reject. It exercises Android in full and skips the iOS paths that would take over the Simulator with WebDriverAgent; set `MOBILE_MCP_LIVE_WDA=1` to include them.
 

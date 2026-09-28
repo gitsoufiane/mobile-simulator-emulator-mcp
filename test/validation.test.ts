@@ -16,7 +16,9 @@ import {
 	parseOnlineDevice,
 	validateAppIdentifier,
 	validateAppPath,
+	validateCertificatePath,
 	validateMediaPath,
+	validateOutputPath,
 	validatePermission,
 	validatePushPayload,
 	validateUrl,
@@ -170,6 +172,41 @@ test("confines app paths after resolving symlinks", async () => {
 			() => validateAppPath("android", "escape.apk"),
 			/beneath/u,
 		);
+	} finally {
+		if (previousRoot === undefined) delete process.env.MOBILE_MCP_APP_ROOT;
+		else process.env.MOBILE_MCP_APP_ROOT = previousRoot;
+		await rm(base, { recursive: true, force: true });
+	}
+});
+
+test("confines new artifacts and certificates beneath the app root", async () => {
+	const base = await mkdtemp(join(tmpdir(), "mobile-mcp-out-"));
+	const root = join(base, "root");
+	const previousRoot = process.env.MOBILE_MCP_APP_ROOT;
+	try {
+		await mkdir(join(root, "videos"), { recursive: true });
+		await Promise.all([
+			writeFile(join(root, "videos", "taken.mp4"), "x"),
+			writeFile(join(root, "proxy.pem"), "cert"),
+			writeFile(join(base, "outside.pem"), "cert"),
+		]);
+		await symlink(base, join(root, "escape"));
+		process.env.MOBILE_MCP_APP_ROOT = root;
+		const realRoot = await realpath(root);
+
+		assert.equal(
+			await validateOutputPath("videos/run.mp4", ".mp4"),
+			join(realRoot, "videos", "run.mp4"),
+		);
+		await assert.rejects(() => validateOutputPath("videos/taken.mp4", ".mp4"), /already exists/u);
+		await assert.rejects(() => validateOutputPath("run.mov", ".mp4"), /\.mp4/u);
+		await assert.rejects(() => validateOutputPath("missing/run.mp4", ".mp4"), /does not exist/u);
+		await assert.rejects(() => validateOutputPath("../run.mp4", ".mp4"), /beneath/u);
+		await assert.rejects(() => validateOutputPath("escape/run.mp4", ".mp4"), /beneath/u);
+
+		assert.equal(await validateCertificatePath("proxy.pem"), join(realRoot, "proxy.pem"));
+		await assert.rejects(() => validateCertificatePath("escape/outside.pem"), /beneath/u);
+		await assert.rejects(() => validateCertificatePath("videos/taken.mp4"), /Certificates must use/u);
 	} finally {
 		if (previousRoot === undefined) delete process.env.MOBILE_MCP_APP_ROOT;
 		else process.env.MOBILE_MCP_APP_ROOT = previousRoot;
