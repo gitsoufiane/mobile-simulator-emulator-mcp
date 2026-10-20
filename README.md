@@ -1,16 +1,28 @@
-# Mobile Simulator & Emulator MCP
+<p align="center">
+  <img src="assets/logo.svg" width="120" alt="Mobile Simulator and Emulator MCP logo">
+</p>
 
-A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets coding agents inspect, control, and test Apple iOS Simulators and Google Android Emulators. It exposes 55 typed tools for device lifecycle, app discovery and management, UI automation by element or coordinate, waiting for and scrolling to elements, system alerts, screenshots and screen recording, logs and crash reports, permissions, location and routes, biometrics, lock state, locale, appearance/accessibility and accessibility audits, network proxies and certificates, emulator snapshots, calls, sensors, and other platform-specific test conditions.
+<h1 align="center">Mobile Simulator & Emulator MCP</h1>
 
-It defaults to stdio and can also serve Streamable HTTP on loopback with `--listen`.
+<p align="center">Let your AI agent use iOS Simulators and Android Emulators to test your app.</p>
 
-It uses:
+## What it does
 
-- `xcrun simctl` for iOS Simulator lifecycle, apps, URLs, and screenshots.
-- [Appium WebDriverAgent](https://github.com/appium/WebDriverAgent) for iOS UI trees and input.
-- Google `adb` and `emulator` for Android lifecycle, apps, UI trees, screenshots, and input.
+Your coding agent can open, tap, type, scroll, and check apps on a local device, through [MCP (Model Context Protocol)](https://modelcontextprotocol.io/).
 
-Physical devices are intentionally rejected.
+- **55 tools** for apps, screen actions, screenshots, logs, location, permissions, and device settings.
+- **Finds buttons by their text**, so the agent does not guess screen positions.
+- **Waits and scrolls for you** with `mobile_wait_for_element` and `mobile_scroll_to_element`.
+- **Local and safe**: simulators and emulators only, no shell access, no telemetry.
+
+## How it works
+
+| Platform | Uses |
+| --- | --- |
+| iOS Simulator | `xcrun simctl` and [Appium WebDriverAgent](https://github.com/appium/WebDriverAgent) |
+| Android Emulator | Google `adb` and `emulator` |
+
+It runs over stdio. Add `--listen` for HTTP on your own machine only. Physical devices are rejected.
 
 ## Requirements
 
