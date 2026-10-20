@@ -43,7 +43,8 @@
     "live": "node dist/test/live-smoke.js",
     "live:deep": "node dist/test/live-manipulation.js",
     "live:tools": "node dist/test/live-tools.js",
-    "live:extended": "node dist/test/live-extended.js"
+    "live:extended": "node dist/test/live-extended.js",
+    "live:destructive": "node dist/test/live-destructive.js"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "1.32.1",

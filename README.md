@@ -212,7 +212,7 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | `mobile_dismiss_keyboard` | Hide the software keyboard |
 | `mobile_set_lock` | Lock or unlock the screen and report the resulting state |
 | `mobile_simulate_biometric` | Enroll/unenroll iOS Face ID or Touch ID and deliver matching or failing scans (Xcode 27) |
-| `mobile_record_screen` | Record a fixed-length `.mp4` beneath the app root |
+| `mobile_record_screen` | Record an `.mp4` beneath the app root, for a fixed time or from `start` to `stop` |
 | `mobile_get_crash_logs` | Return an app's Android crash buffer or summarized iOS Simulator crash reports |
 | `mobile_accessibility_audit` | Run Apple's XCTest accessibility audit on the foreground iOS app |
 | `mobile_keychain` | Add a root or regular certificate to, or reset, the iOS Simulator keychain |
@@ -265,7 +265,7 @@ Treat this server like any local developer tool: it runs with the MCP client's o
 - `mobile_get_ui_tree` and Android input need the screen on and unlocked. A sleeping Android Emulator makes `uiautomator dump` fail, and the server reports that as an error rather than returning an empty tree.
 - `mobile_set_accessibility` splits by platform: `contentSize`/`increaseContrast`/`reduceTransparency` are iOS-only, `fontScale` is Android-only. `reduceMotion` and `screenReader` work on both; on iOS they need Xcode 27 `devicectl`, and Android TalkBack must be installed in the emulator image.
 - Android `mobile_set_orientation` locks rotation; pass `auto` to restore sensor rotation. iOS uses `devicectl` on Xcode 27 (works on the portrait-only home screen) and falls back to WebDriverAgent on older Xcode.
-- `mobile_record_screen` blocks for its duration (1–180 s). Android `screenrecord` has no audio.
+- `mobile_record_screen` records for 1–180 s. The default `record` action blocks; use `action: "start"`, act, then `action: "stop"` to record your own taps. Android `screenrecord` has no audio and stops at 180 s.
 - `mobile_get_crash_logs` on iOS reads `~/Library/Logs/DiagnosticReports` and keeps only reports whose `coalitionName` names the target Simulator.
 - The Android proxy is applied by the emulator process on the Mac, so use a Mac-side address such as `127.0.0.1:8888`, not the guest alias `10.0.2.2`.
 - Android `mobile_set_lock` unlock dismisses only the default swipe keyguard; a PIN, pattern, or password stays locked and the tool reports an error.
@@ -315,16 +315,19 @@ npm run live
 npm run live:deep
 npm run live:tools
 npm run live:extended
+npm run live:destructive
 npm audit --omit=dev
 ```
 
-`npm run live:extended` exercises every 0.5.0 tool on both platforms against Settings and Safari and restores each change: locale, launch arguments/extras, element taps, keyboard, orientation (including a landscape tap beyond the portrait width), double tap, lock, recording, crash logs, snapshots, calls and console `KO:` errors, sensors, proxy, reduce motion, TalkBack/VoiceOver, the notification shade, Face ID, alerts, and the accessibility audit. `mobile_keychain` and alert accept change Simulator trust and permission state, so verify them on a throwaway Simulator (`xcrun simctl create`) instead.
+Every tool must pass a live test before you push. Boot one iOS Simulator and one Android Emulator, then run all the commands above. Together the `live*` gates call all 55 tools.
+
+`npm run live:extended` exercises every 0.5.0 tool on both platforms against Settings and Safari and restores each change: locale, launch arguments/extras, element taps, keyboard, orientation (including a landscape tap beyond the portrait width), double tap, lock, recording, crash logs, snapshots, calls and console `KO:` errors, sensors, proxy, reduce motion, TalkBack/VoiceOver, the notification shade, Face ID, alerts, and the accessibility audit.
 
 `npm run live:tools` covers the app-discovery, appearance, accessibility, screen-info, and long-press tools, and asserts that platform and coordinate rejections still reject. It exercises Android in full and skips the iOS paths that would take over the Simulator with WebDriverAgent; set `MOBILE_MCP_LIVE_WDA=1` to include them.
 
 `npm run live` performs fast screenshots, UI-tree reads, and HOME input on both platforms. `npm run live:deep` uses the MCP stdio protocol to manipulate Android and iOS Settings, exercise a spare iOS boot/shutdown when available, set simulated locations, collect app logs, round-trip the iOS clipboard, override/clear the iOS status bar, change/restore Android battery and network profiles, rotate Android four times, remove a fingerprint touch, type and swipe, open `https://example.com`, verify screenshots and UI changes, exercise rejected inputs, and restore managed state.
 
-Destructive app/device tools, permission changes, push, SMS, and install/uninstall need a disposable application/device fixture. The release gate does not run them against system apps.
+`npm run live:destructive` tests the tools that install, delete, or erase. It never touches your devices: it creates a throwaway iOS Simulator and Android Emulator (AVD `mobile_mcp_disposable`), builds a tiny test app for each, and deletes all of them at the end. It covers boot, shutdown, install, uninstall, reset, permissions, push, media, keychain, SMS, connectivity, and erase. It needs Xcode, Android build-tools 37.0.0, the `android-36` platform, the `android-37.0` Play Store 16 KB system image, a JDK (`keytool`), and `openssl`. It takes a few minutes, mostly for the emulator cold boot.
 
 ## Official references
 
