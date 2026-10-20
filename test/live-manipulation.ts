@@ -403,12 +403,16 @@ try {
 		uiTree(ios.id),
 	]);
 	let androidPromptsDismissed = 0;
+	const chromePromptDismissLabels = ["Use without an account", "No thanks"];
+	let promptLabel: string | undefined;
 	while (
 		!/Example Domain|example\.com/iu.test(androidBrowserTree) &&
-		androidBrowserTree.includes("No thanks") &&
+		(promptLabel = chromePromptDismissLabels.find((label) =>
+			androidBrowserTree.includes(label),
+		)) !== undefined &&
 		androidPromptsDismissed < 3
 	) {
-		await tap(android.id, androidPoint(androidBrowserTree, "No thanks"));
+		await tap(android.id, androidPoint(androidBrowserTree, promptLabel));
 		androidPromptsDismissed += 1;
 		await pause(2_000);
 		androidBrowserTree = await uiTree(android.id);
