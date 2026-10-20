@@ -116,17 +116,21 @@ export function validateAndroidUiTree(
 	tree: string,
 	remotePath: string,
 ): string {
-	if (!dump.includes(remotePath)) {
-		throw new Error(
-			`uiautomator could not dump the UI (is the screen on and unlocked?): ${dump.trim() || "no output"}`,
-		);
-	}
+	validateAndroidUiDump(dump, remotePath);
 	if (!tree.includes("<hierarchy")) {
 		throw new Error(
 			`Android returned no UI hierarchy: ${tree.trim().slice(0, 200) || "empty output"}`,
 		);
 	}
 	return tree;
+}
+
+export function validateAndroidUiDump(dump: string, remotePath: string): void {
+	if (!dump.includes(remotePath)) {
+		throw new Error(
+			`uiautomator could not dump the UI (is the screen on and unlocked?): ${dump.trim() || "no output"}`,
+		);
+	}
 }
 
 /**
@@ -157,6 +161,9 @@ function safeMediaName(path: string): string {
 		);
 	return name;
 }
+
+const UI_DUMP_ATTEMPTS = 3;
+const UI_DUMP_RETRY_MS = 500;
 
 export class AndroidController {
 	readonly adb = sdkBinary("platform-tools/adb", "adb");
@@ -737,6 +744,22 @@ export class AndroidController {
 	}
 
 	async uiTree(serial: string): Promise<string> {
+		for (let attempt = 1; ; attempt += 1) {
+			try {
+				return await this.dumpUiTree(serial);
+			} catch (error) {
+				// While a window opens or animates, uiautomator reports "null root
+				// node" or "could not get idle state"; it succeeds once it settles.
+				const transient =
+					error instanceof Error &&
+					/null root node|could not get idle state/iu.test(error.message);
+				if (!transient || attempt >= UI_DUMP_ATTEMPTS) throw error;
+				await sleep(UI_DUMP_RETRY_MS);
+			}
+		}
+	}
+
+	private async dumpUiTree(serial: string): Promise<string> {
 		const remotePath = "/sdcard/mobile-mcp-ui.xml";
 		try {
 			// uiautomator reports failures such as "could not get idle state" on
@@ -747,6 +770,8 @@ export class AndroidController {
 				15_000,
 			);
 			const dump = `${stdout}\n${stderr}`;
+			// Without a dump file, `cat` fails and hides the dump error.
+			validateAndroidUiDump(dump, remotePath);
 			const { stdout: tree } = await this.command(
 				serial,
 				["exec-out", "cat", remotePath],

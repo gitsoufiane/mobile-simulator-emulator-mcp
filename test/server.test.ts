@@ -26,7 +26,7 @@ after(async () => {
 test("lists the focused mobile tool surface", async () => {
 	const result = await client.listTools();
 	const names = result.tools.map((tool) => tool.name);
-	assert.equal(names.length, 53);
+	assert.equal(names.length, 55);
 	assert.deepEqual(names, [
 		"mobile_doctor",
 		"mobile_list_devices",
@@ -62,6 +62,8 @@ test("lists the focused mobile tool surface", async () => {
 		"mobile_get_ui_tree",
 		"mobile_list_elements",
 		"mobile_tap_element",
+		"mobile_wait_for_element",
+		"mobile_scroll_to_element",
 		"mobile_double_tap",
 		"mobile_handle_alert",
 		"mobile_dismiss_keyboard",

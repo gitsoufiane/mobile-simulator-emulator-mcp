@@ -22,8 +22,9 @@ import {
 	filterElements,
 	parseAndroidElements,
 	parseIosElements,
+	type UiElement,
 } from "./elements.js";
-import { run, tailLines } from "./exec.js";
+import { run, sleep, tailLines } from "./exec.js";
 import { IosController } from "./ios.js";
 import { WdaController } from "./wda.js";
 
@@ -49,12 +50,16 @@ const INSTRUCTIONS = `Controls local iOS Simulators and Android Emulators for ap
 Call mobile_doctor first, then mobile_list_devices, and reuse the exact returned ID (ios:<UDID>, android:emulator-5554, or android-avd:<name>) in every later call.
 Discover app identifiers with mobile_list_apps instead of guessing bundle IDs or package names.
 Read the screen before acting: mobile_list_elements returns compact elements with tap-ready center coordinates (pass query to find one element); use mobile_take_screenshot for visual context and mobile_get_ui_tree only when the full native hierarchy is needed. Then use mobile_tap, mobile_long_press, mobile_swipe, or mobile_type_text, and re-read after every state-changing action.
+After a launch, tap, or navigation, call mobile_wait_for_element instead of sleeping or polling. To reach an element below or beside the visible area, call mobile_scroll_to_element.
 
 The first iOS UI call builds and launches WebDriverAgent through Xcode and can take several minutes; later iOS calls reuse that process.
 Destructive tools (install, uninstall, reset, erase, permission changes) run without extra confirmation, so target only disposable app and device state.
 Prefer mobile_tap_element (by label) over raw coordinates. On iOS, clear permission prompts and other system alerts with mobile_handle_alert.
 Platform coverage differs: clipboard, push, status bar, alerts, Face ID (mobile_simulate_biometric), keychain, accessibility audit, and location routes are iOS-only; SMS, fingerprint, battery, network profiles, connectivity, snapshots, phone calls, sensors, proxy, and mobile_rotate are Android-only. Each tool reports the unsupported platform in its error message.`;
 const TEXT_LIMIT = 1_000_000;
+const WAIT_INTERVAL_MS = 500;
+const SCROLL_SWIPE_MS = 400;
+const SCROLL_MAX_SWIPES = 10;
 const IOS_UUID =
 	/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/iu;
 const ANDROID_SERIAL = /^emulator-\d{4}$/u;
@@ -1923,6 +1928,22 @@ export function createMobileServer(options: ServerOptions = {}): {
 		else await android.tap(target.target, x, y);
 	};
 
+	const swipeAt = async (
+		target: OnlineDevice,
+		fromX: number,
+		fromY: number,
+		toX: number,
+		toY: number,
+		durationMs: number,
+	): Promise<void> => {
+		if (target.platform === "ios")
+			await useWda(target.target, () =>
+				wda.swipe(fromX, fromY, toX, toY, durationMs),
+			);
+		else
+			await android.swipe(target.target, fromX, fromY, toX, toY, durationMs);
+	};
+
 	server.registerTool(
 		"mobile_tap_element",
 		{
@@ -1975,6 +1996,137 @@ export function createMobileServer(options: ServerOptions = {}): {
 				matches: matched.length,
 				element,
 			});
+		}),
+	);
+
+	server.registerTool(
+		"mobile_wait_for_element",
+		{
+			title: "Wait For Element",
+			description:
+				"Wait until an element matching query (same matching as mobile_list_elements) is visible, or until it is gone. Reads the screen every 500 ms and retries transient read errors. Use it after launches, taps, and navigation instead of sleeping. Fails with the last error when timeoutMs passes.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					query: z.string().min(1).max(200),
+					state: z.enum(["visible", "gone"]).default("visible"),
+					timeoutMs: z.number().int().min(500).max(60_000).default(10_000),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				state: z.enum(["visible", "gone"]),
+				elapsedMs: z.number().int().nonnegative(),
+				matches: z.number().int().nonnegative(),
+				element: elementSchema.optional(),
+			}),
+			annotations: {
+				readOnlyHint: true,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, query, state, timeoutMs }) => {
+			const target = parseOnlineDevice(device);
+			const started = Date.now();
+			let lastError: unknown;
+			for (;;) {
+				try {
+					const matched = filterElements(await readElements(target), query);
+					lastError = undefined;
+					if ((state === "visible") === matched.length > 0)
+						return jsonResult({
+							device,
+							state,
+							elapsedMs: Date.now() - started,
+							matches: matched.length,
+							...(matched[0] ? { element: matched[0] } : {}),
+						});
+				} catch (error) {
+					// Screens in transition make uiautomator and WDA fail briefly.
+					lastError = error;
+				}
+				if (Date.now() - started + WAIT_INTERVAL_MS > timeoutMs) break;
+				await sleep(WAIT_INTERVAL_MS);
+			}
+			const reason =
+				lastError instanceof Error ? ` Last read error: ${lastError.message}` : "";
+			throw new Error(
+				state === "visible"
+					? `No element matching "${query}" appeared within ${timeoutMs} ms.${reason} Call mobile_list_elements to see what is visible.`
+					: `An element matching "${query}" is still visible after ${timeoutMs} ms.${reason}`,
+			);
+		}),
+	);
+
+	server.registerTool(
+		"mobile_scroll_to_element",
+		{
+			title: "Scroll To Element",
+			description:
+				"Swipe until an element matching query (same matching as mobile_list_elements) has its center on screen. direction down reveals content below; up reveals content above. Stops when the screen no longer changes (end of content) or after 10 swipes.",
+			inputSchema: z
+				.object({
+					device: deviceSchema,
+					query: z.string().min(1).max(200),
+					direction: z.enum(["down", "up"]).default("down"),
+				})
+				.strict(),
+			outputSchema: z.object({
+				device: z.string(),
+				swipes: z.number().int().nonnegative(),
+				matches: z.number().int().nonnegative(),
+				element: elementSchema,
+			}),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: true,
+				idempotentHint: false,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ device, query, direction }) => {
+			const target = parseOnlineDevice(device);
+			const { width, height } =
+				target.platform === "ios"
+					? await useWda(target.target, () => wda.screenInfo())
+					: await android.screenInfo(target.target);
+			const onScreen = (entry: UiElement) =>
+				entry.center.x >= 0 &&
+				entry.center.y >= 0 &&
+				entry.center.x < width &&
+				entry.center.y < height;
+			// The finger moves against the scroll direction, across the middle 40%.
+			const x = Math.round(width / 2);
+			const low = Math.round(height * 0.7);
+			const high = Math.round(height * 0.3);
+			const [fromY, toY] = direction === "down" ? [low, high] : [high, low];
+			let previous = "";
+			for (let swipes = 0; ; swipes += 1) {
+				const elements = await readElements(target);
+				const matched = filterElements(elements, query).filter(onScreen);
+				if (matched[0])
+					return jsonResult({
+						device,
+						swipes,
+						matches: matched.length,
+						element: matched[0],
+					});
+				const signature = JSON.stringify(elements);
+				if (signature === previous)
+					throw new Error(
+						`No element matching "${query}" found; the screen stopped changing after ${swipes} swipes ${direction}. Try another direction or query.`,
+					);
+				if (swipes === SCROLL_MAX_SWIPES)
+					throw new Error(
+						`No element matching "${query}" found after ${SCROLL_MAX_SWIPES} swipes ${direction}. Call it again to continue, or try the other direction.`,
+					);
+				previous = signature;
+				await swipeAt(target, x, fromY, x, toY, SCROLL_SWIPE_MS);
+				// Let scroll momentum settle so the next read sees the final layout.
+				await sleep(700);
+			}
 		}),
 	);
 
@@ -2649,13 +2801,14 @@ export function createMobileServer(options: ServerOptions = {}): {
 			},
 		},
 		safe(async ({ device, fromX, fromY, toX, toY, durationMs }) => {
-			const target = parseOnlineDevice(device);
-			if (target.platform === "ios") {
-				await useWda(target.target, () =>
-					wda.swipe(fromX, fromY, toX, toY, durationMs),
-				);
-			} else
-				await android.swipe(target.target, fromX, fromY, toX, toY, durationMs);
+			await swipeAt(
+				parseOnlineDevice(device),
+				fromX,
+				fromY,
+				toX,
+				toY,
+				durationMs,
+			);
 			return jsonResult({
 				device,
 				swiped: { fromX, fromY, toX, toY, durationMs },

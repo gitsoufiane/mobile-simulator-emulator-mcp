@@ -68,6 +68,8 @@ Build a local MCP server that lets an agent discover and control Apple iOS Simul
 51. `mobile_phone_call`
 52. `mobile_set_sensor`
 53. `mobile_set_proxy`
+54. `mobile_wait_for_element`
+55. `mobile_scroll_to_element`
 
 ## Safety boundaries
 

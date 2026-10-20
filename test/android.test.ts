@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+	AndroidController,
 	KEYCODES,
 	parseAndroidDisplaySize,
 	parseAndroidForegroundApp,
@@ -108,4 +109,39 @@ test("lists emulator snapshot tags", () => {
 		"checkout_ready",
 	]);
 	assert.deepEqual(parseAndroidSnapshots("OK\n"), []);
+});
+
+test("retries transient uiautomator dump failures, but not other failures", async () => {
+	const remotePath = "/sdcard/mobile-mcp-ui.xml";
+	const fake = (dumps: string[]) => {
+		const controller = new AndroidController();
+		let dumpCalls = 0;
+		Object.assign(controller, {
+			command: async (_serial: string, args: readonly string[]) => {
+				if (args.includes("dump")) {
+					const stderr = dumps[Math.min(dumpCalls, dumps.length - 1)] ?? "";
+					dumpCalls += 1;
+					return { stdout: "", stderr };
+				}
+				if (args.includes("cat"))
+					return { stdout: "<hierarchy rotation=\"0\" />", stderr: "" };
+				return { stdout: "", stderr: "" };
+			},
+		});
+		return { controller, dumpCalls: () => dumpCalls };
+	};
+	const ok = `UI hierchary dumped to: ${remotePath}`;
+	const nullRoot = "ERROR: null root node returned by UiTestAutomationBridge.";
+
+	const recovers = fake([nullRoot, ok]);
+	assert.match(await recovers.controller.uiTree("emulator-5554"), /<hierarchy/u);
+	assert.equal(recovers.dumpCalls(), 2);
+
+	const persistent = fake([nullRoot]);
+	await assert.rejects(persistent.controller.uiTree("emulator-5554"), /null root node/u);
+	assert.equal(persistent.dumpCalls(), 3);
+
+	const locked = fake(["ERROR: screen is off"]);
+	await assert.rejects(locked.controller.uiTree("emulator-5554"), /screen is off/u);
+	assert.equal(locked.dumpCalls(), 1);
 });

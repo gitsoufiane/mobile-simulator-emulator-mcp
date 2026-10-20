@@ -73,6 +73,22 @@ async function waitForLabel(device: string, query: string): Promise<void> {
 	throw new Error(`No element matching "${query}" appeared on ${device}`);
 }
 
+/** Scrolls down to a lower row and back up, so later steps see the top. */
+async function scrollRoundTrip(
+	device: string,
+	lower: string,
+	top: string,
+): Promise<void> {
+	const down = await call("mobile_scroll_to_element", { device, query: lower });
+	assert.ok((down.swipes as number) >= 1, `${lower} needed at least one swipe`);
+	const up = await call("mobile_scroll_to_element", {
+		device,
+		query: top,
+		direction: "up",
+	});
+	assert.ok((up.swipes as number) >= 1, `${top} needed at least one swipe`);
+}
+
 async function record(device: string, name: string): Promise<void> {
 	const result = await call("mobile_record_screen", {
 		device,
@@ -91,6 +107,8 @@ async function record(device: string, name: string): Promise<void> {
 async function android(device: string): Promise<void> {
 	const settings = "com.android.settings";
 	await call("mobile_press_key", { device, key: "HOME" });
+	// Start from the Settings main page, not a subpage left by an earlier run.
+	await call("mobile_terminate_app", { device, appId: settings });
 
 	await call("mobile_launch_app", { device, appId: settings, locale: "fr-FR" });
 	await waitForLabel(device, "Réseau");
@@ -106,8 +124,12 @@ async function android(device: string): Promise<void> {
 	const tapped = await call("mobile_tap_element", { device, query: "Network" });
 	assert.match(String((tapped.element as { label?: string }).label), /Network/u);
 	await waitForLabel(device, "Internet");
+	await call("mobile_wait_for_element", { device, query: "Connected devices", state: "gone" });
 	await call("mobile_press_key", { device, key: "BACK" });
-	passed.push("android tap_element Network & internet");
+	passed.push("android tap_element Network & internet, wait_for_element gone");
+
+	await scrollRoundTrip(device, "About", "Network");
+	passed.push("android scroll_to_element About -> Network");
 
 	await call("mobile_tap_element", { device, query: "Search" });
 	await pause(1_000);
@@ -252,9 +274,12 @@ async function ios(device: string): Promise<void> {
 	assert.equal(typeof audit.count, "number");
 	passed.push(`ios accessibility audit (${String(audit.count)} issues)`);
 
+	await scrollRoundTrip(device, "Developer", "General");
+	passed.push("ios scroll_to_element Developer -> General");
+
 	await call("mobile_tap_element", { device, query: "General" });
-	await waitForLabel(device, "About");
-	passed.push("ios tap_element General");
+	await call("mobile_wait_for_element", { device, query: "About" });
+	passed.push("ios tap_element General, wait_for_element visible");
 
 	await call("mobile_launch_app", { device, appId: settings });
 	await waitForLabel(device, "General");

@@ -1,6 +1,6 @@
 # Mobile Simulator & Emulator MCP
 
-A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets coding agents inspect, control, and test Apple iOS Simulators and Google Android Emulators. It exposes 53 typed tools for device lifecycle, app discovery and management, UI automation by element or coordinate, system alerts, screenshots and screen recording, logs and crash reports, permissions, location and routes, biometrics, lock state, locale, appearance/accessibility and accessibility audits, network proxies and certificates, emulator snapshots, calls, sensors, and other platform-specific test conditions.
+A local [Model Context Protocol](https://modelcontextprotocol.io/) server that lets coding agents inspect, control, and test Apple iOS Simulators and Google Android Emulators. It exposes 55 typed tools for device lifecycle, app discovery and management, UI automation by element or coordinate, waiting for and scrolling to elements, system alerts, screenshots and screen recording, logs and crash reports, permissions, location and routes, biometrics, lock state, locale, appearance/accessibility and accessibility audits, network proxies and certificates, emulator snapshots, calls, sensors, and other platform-specific test conditions.
 
 It defaults to stdio and can also serve Streamable HTTP on loopback with `--listen`.
 
@@ -139,7 +139,7 @@ The server writes MCP protocol messages only to stdout. Diagnostics and WebDrive
 5. Set permissions or simulated location needed by the scenario.
 6. Call `mobile_list_elements` before using coordinates. It returns compact elements with tap-ready `center` coordinates; pass `query` to find one element. Use `mobile_take_screenshot` for visual context and `mobile_get_ui_tree` only when you need the full native hierarchy.
 7. Interact with `mobile_tap`, `mobile_swipe`, `mobile_type_text`, and `mobile_press_key`.
-8. Re-read the UI tree or screenshot after each state-changing action.
+8. Re-read the UI tree or screenshot after each state-changing action. Use `mobile_wait_for_element` to wait for a screen to load instead of sleeping, and `mobile_scroll_to_element` to reach rows that are not on screen yet.
 9. Collect `mobile_get_logs` when a workflow fails. Use `mobile_reset_app` only when a clean app state is required.
 
 ## Example requests
@@ -193,6 +193,8 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | `mobile_get_ui_tree` | Return iOS JSON or Android XML UI hierarchy |
 | `mobile_list_elements` | Return compact labeled/interactive elements with tap-ready center coordinates |
 | `mobile_tap_element` | Tap, double tap, or long press an element found by label, identifier, value, or type |
+| `mobile_wait_for_element` | Wait until an element is visible or gone, retrying transient screen-read errors (timeout up to 60 s) |
+| `mobile_scroll_to_element` | Swipe in a direction until an element's center is on screen; stops at the end of the content |
 | `mobile_double_tap` | Double tap validated coordinates |
 | `mobile_handle_alert` | List, accept, or dismiss the visible iOS alert, optionally by button label |
 | `mobile_dismiss_keyboard` | Hide the software keyboard |
