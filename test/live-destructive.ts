@@ -86,12 +86,6 @@ async function call(name: string, args: Record<string, unknown>): Promise<Record
 	return result.structuredContent ?? {};
 }
 
-async function rejects(name: string, args: Record<string, unknown>, pattern: RegExp): Promise<void> {
-	const result = (await client.callTool({ name, arguments: args })) as CallToolResult;
-	assert.equal(result.isError, true, `${name} should fail`);
-	assert.match(JSON.stringify(result.content), pattern);
-}
-
 async function hasFixture(device: string): Promise<boolean> {
 	const listed = await call("mobile_list_apps", { device });
 	return (listed.apps as Array<{ appId: string }>).some((app) => app.appId === APP_ID);
@@ -182,7 +176,9 @@ async function android(): Promise<void> {
 	assert.equal(await hasFixture(device), false, "fixture is gone after uninstall");
 	passed.push("android uninstall_app");
 
-	await rejects("mobile_erase_device", { device }, /boot-time operation/u);
+	const erase = (await client.callTool({ name: "mobile_erase_device", arguments: { device } })) as CallToolResult;
+	assert.equal(erase.isError, true, "Android erase must be refused");
+	assert.match(JSON.stringify(erase.content), /boot-time operation/u);
 	passed.push("android erase_device is refused (wipe is boot-time only)");
 
 	await call("mobile_shutdown_device", { device });
