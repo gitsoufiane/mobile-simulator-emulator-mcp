@@ -5,6 +5,11 @@ import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
 import { CommandError, run, tailLines } from "./exec.js";
 
+/** A screen recording that runs until stop() finalizes the file. */
+export interface Recording {
+	stop(): Promise<void>;
+}
+
 export type IosBiometricAction = "enroll" | "unenroll" | "match" | "fail";
 export type IosOrientation =
 	| "portrait"
@@ -362,11 +367,7 @@ export class IosController {
 	}
 
 	/** simctl records until SIGINT; it then finalizes the file and exits 0. */
-	async recordVideo(
-		udid: string,
-		outputPath: string,
-		seconds: number,
-	): Promise<void> {
+	async startVideo(udid: string, outputPath: string): Promise<Recording> {
 		const child = spawn(
 			"xcrun",
 			["simctl", "io", udid, "recordVideo", "--codec=h264", outputPath],
@@ -388,16 +389,27 @@ export class IosController {
 			const first = await Promise.race([started.then(() => "started"), exited]);
 			if (first !== "started")
 				throw new Error(`simctl recordVideo did not start: ${stderr.trim()}`);
-			clearTimeout(startTimeout);
-			await new Promise((resolve) => setTimeout(resolve, seconds * 1_000));
-			child.kill("SIGINT");
-			const code = await exited;
-			if (code !== 0)
-				throw new Error(`simctl recordVideo exited with ${String(code)}: ${stderr.trim()}`);
+		} catch (error) {
+			if (child.exitCode === null) child.kill("SIGKILL");
+			throw error;
 		} finally {
 			clearTimeout(startTimeout);
-			if (child.exitCode === null) child.kill("SIGKILL");
 		}
+		return {
+			stop: async () => {
+				child.kill("SIGINT");
+				const stopTimeout = setTimeout(() => child.kill("SIGKILL"), 30_000);
+				try {
+					const code = await exited;
+					if (code !== 0)
+						throw new Error(
+							`simctl recordVideo exited with ${String(code)}: ${stderr.trim()}`,
+						);
+				} finally {
+					clearTimeout(stopTimeout);
+				}
+			},
+		};
 	}
 
 	async crashReports(

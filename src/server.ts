@@ -419,6 +419,10 @@ export function createMobileServer(options: ServerOptions = {}): {
 	close: () => Promise<void>;
 } {
 	const ownsControllers = options.controllers === undefined;
+	const recordings = new Map<
+		string,
+		{ path: string; startedAt: number; stop: () => Promise<void> }
+	>();
 	const { android, ios, wda } = options.controllers ?? createControllers();
 	const server = new McpServer(
 		{ name: "local-mobile-mcp-server", version: VERSION },
@@ -2290,18 +2294,30 @@ export function createMobileServer(options: ServerOptions = {}): {
 		{
 			title: "Record Screen Video",
 			description:
-				"Record the screen for a fixed duration to a new .mp4 file beneath MOBILE_MCP_APP_ROOT. The call blocks for the duration, so start it and then interact from another call only if your client runs tools concurrently.",
+				"Record the screen to a new .mp4 file beneath MOBILE_MCP_APP_ROOT. action record (default) blocks for durationSeconds. action start returns at once so you can tap and type while it records; durationSeconds is then the maximum. Call action stop (device only) to finish and get the file.",
 			inputSchema: z
 				.object({
 					device: deviceSchema,
-					path: z.string().min(1).max(2_048),
+					action: z.enum(["record", "start", "stop"]).default("record"),
+					path: z
+						.string()
+						.min(1)
+						.max(2_048)
+						.optional()
+						.describe("Required for record and start"),
 					durationSeconds: z.number().int().min(1).max(180).default(10),
 				})
 				.strict(),
 			outputSchema: z.object({
 				device: z.string(),
+				action: z.enum(["record", "start", "stop"]),
 				path: z.string(),
-				bytes: z.number().int().nonnegative(),
+				bytes: z
+					.number()
+					.int()
+					.nonnegative()
+					.optional()
+					.describe("Set once the file is final: after record and stop"),
 				durationSeconds: z.number().int(),
 			}),
 			annotations: {
@@ -2311,14 +2327,50 @@ export function createMobileServer(options: ServerOptions = {}): {
 				openWorldHint: false,
 			},
 		},
-		safe(async ({ device, path, durationSeconds }) => {
+		safe(async ({ device, action, path, durationSeconds }) => {
 			const target = parseOnlineDevice(device);
+			if (action === "stop") {
+				const active = recordings.get(device);
+				if (!active)
+					throw new Error(`No recording is in progress on ${device}`);
+				recordings.delete(device);
+				await active.stop();
+				const { size } = await stat(active.path);
+				return jsonResult({
+					device,
+					action,
+					path: active.path,
+					bytes: size,
+					durationSeconds: Math.round((Date.now() - active.startedAt) / 1_000),
+				});
+			}
+			if (!path) throw new Error(`path is required for action ${action}`);
+			if (recordings.has(device))
+				throw new Error(
+					`${device} is already recording; call mobile_record_screen with action stop first`,
+				);
 			const output = await validateOutputPath(path, ".mp4");
-			if (target.platform === "ios")
-				await ios.recordVideo(target.target, output, durationSeconds);
-			else await android.recordScreen(target.target, output, durationSeconds);
-			const { size } = await stat(output);
-			return jsonResult({ device, path: output, bytes: size, durationSeconds });
+			const recording =
+				target.platform === "ios"
+					? await ios.startVideo(target.target, output)
+					: await android.startScreenRecord(target.target, output, durationSeconds);
+			if (action === "record") {
+				await sleep(durationSeconds * 1_000);
+				await recording.stop();
+				const { size } = await stat(output);
+				return jsonResult({ device, action, path: output, bytes: size, durationSeconds });
+			}
+			// Stop once: from the action stop call, the time limit, or server close.
+			let stopping: Promise<void> | undefined;
+			const stop = () => {
+				clearTimeout(limit);
+				stopping ??= recording.stop();
+				return stopping;
+			};
+			// The error, if any, is reported by the later action stop call.
+			const limit = setTimeout(() => void stop().catch(() => undefined), durationSeconds * 1_000);
+			recordings.set(device, { path: output, startedAt: Date.now(), stop });
+			return jsonResult({ device, action, path: output, durationSeconds });
 		}),
 	);
 
@@ -2887,6 +2939,8 @@ export function createMobileServer(options: ServerOptions = {}): {
 	return {
 		server,
 		close: async () => {
+			// Finalize open recordings so their files stay playable.
+			await Promise.allSettled([...recordings.values()].map((entry) => entry.stop()));
 			if (ownsControllers) await wda.close();
 		},
 	};

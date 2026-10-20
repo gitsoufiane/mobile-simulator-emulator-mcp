@@ -102,6 +102,21 @@ async function record(device: string, name: string): Promise<void> {
 		{ device, path: `.live-artifacts/${name}.mp4`, durationSeconds: 1 },
 		/already exists/u,
 	);
+
+	// start returns at once, so the agent can act while it records.
+	const started = Date.now();
+	await call("mobile_record_screen", {
+		device,
+		action: "start",
+		path: `.live-artifacts/${name}-actions.mp4`,
+		durationSeconds: 60,
+	});
+	assert.ok(Date.now() - started < 10_000, "start did not block");
+	await call("mobile_press_key", { device, key: "HOME" });
+	await pause(2_000);
+	const stopped = await call("mobile_record_screen", { device, action: "stop" });
+	assert.ok((stopped.bytes as number) > 1_000, "start/stop recording has content");
+	assert.equal((await stat(stopped.path as string)).size, stopped.bytes);
 }
 
 async function android(device: string): Promise<void> {
@@ -171,7 +186,7 @@ async function android(device: string): Promise<void> {
 	passed.push("android set_lock true -> false");
 
 	await record(device, "android");
-	passed.push("android record_screen 2s");
+	passed.push("android record_screen 2s, start -> HOME -> stop");
 
 	const crashes = await call("mobile_get_crash_logs", { device, appId: settings });
 	assert.equal(typeof crashes.found, "boolean");
@@ -307,7 +322,7 @@ async function ios(device: string): Promise<void> {
 	passed.push("ios set_lock true -> false");
 
 	await record(device, "ios");
-	passed.push("ios record_screen 2s");
+	passed.push("ios record_screen 2s, start -> HOME -> stop");
 
 	const crashes = await call("mobile_get_crash_logs", {
 		device,

@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { basename, join } from "node:path";
 import { run, runBinary, sleep, tailLines } from "./exec.js";
-import type { MobileApp } from "./ios.js";
+import type { MobileApp, Recording } from "./ios.js";
 
 export interface AndroidDevice {
 	id: string;
@@ -923,23 +923,52 @@ export class AndroidController {
 		);
 	}
 
-	async recordScreen(
+	/**
+	 * screenrecord stops by itself at maxSeconds, or finalizes the file early
+	 * on SIGINT. stop() then pulls the video and removes the device copy.
+	 */
+	async startScreenRecord(
 		serial: string,
 		localPath: string,
-		seconds: number,
-	): Promise<void> {
+		maxSeconds: number,
+	): Promise<Recording> {
 		const remote = `/sdcard/mobile-mcp-${Date.now()}.mp4`;
-		try {
-			await this.shell(
-				serial,
-				["screenrecord", "--time-limit", String(seconds), remote],
-				(seconds + 30) * 1_000,
-			);
-			await this.command(serial, ["pull", remote, localPath], 120_000);
-		} finally {
-			// safe to ignore: remote temp cleanup must not hide the recording result.
-			await this.shell(serial, ["rm", "-f", remote], 5_000).catch(() => undefined);
-		}
+		const child = spawn(
+			this.adb,
+			["-s", serial, "shell", "screenrecord", "--time-limit", String(maxSeconds), remote],
+			{ stdio: ["ignore", "ignore", "pipe"] },
+		);
+		let stderr = "";
+		child.stderr.on("data", (chunk: Buffer) => {
+			if (stderr.length < 10_000) stderr += chunk.toString();
+		});
+		const exited = new Promise<number | null>((resolve, reject) => {
+			child.once("error", reject);
+			child.once("close", resolve);
+		});
+		// screenrecord prints nothing when it starts; an early exit means it failed.
+		const early = await Promise.race([exited, sleep(1_000).then(() => "running")]);
+		if (early !== "running")
+			throw new Error(`screenrecord did not start: ${stderr.trim() || `exit ${String(early)}`}`);
+		return {
+			stop: async () => {
+				try {
+					if (child.exitCode === null)
+						// safe to ignore: pkill fails when the time limit already ended it.
+						await this.shell(serial, ["pkill", "-INT", "-f", remote], 5_000).catch(
+							() => undefined,
+						);
+					const code = await Promise.race([exited, sleep(30_000).then(() => "timeout")]);
+					if (code !== 0)
+						throw new Error(`screenrecord exited with ${String(code)}: ${stderr.trim()}`);
+					await this.command(serial, ["pull", remote, localPath], 120_000);
+				} finally {
+					if (child.exitCode === null) child.kill("SIGKILL");
+					// safe to ignore: remote temp cleanup must not hide the recording result.
+					await this.shell(serial, ["rm", "-f", remote], 5_000).catch(() => undefined);
+				}
+			},
+		};
 	}
 
 	async snapshot(
