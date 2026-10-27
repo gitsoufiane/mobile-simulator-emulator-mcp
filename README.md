@@ -50,7 +50,7 @@ The commands below run the server straight from GitHub. On first use, npm clones
 ### Pi
 
 ```bash
-pi mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp
+pi mcp add mobile --description "iOS Simulators, Android Emulators, and real phones: apps, screenshots, taps, typing. Load the mobile-mcp skill first." -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp
 pi mcp list
 ```
 

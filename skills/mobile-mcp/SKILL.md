@@ -1,6 +1,6 @@
 ---
 name: mobile-mcp
-description: Test and control apps on iOS Simulators, Android Emulators, and physical iPhones, iPads, or Android phones through the mobile MCP server (tools named mobile_*, such as mobile_tap or mcp__mobile__mobile_tap). Use when asked to open, tap, type, swipe, screenshot, install, launch, or check an app on a simulator, emulator, or real phone, to reproduce a mobile UI bug, or to set up the mobile MCP server in Pi, Claude Code, or Codex.
+description: Test and control apps on iOS Simulators, Android Emulators, and physical iPhones, iPads, or Android phones through the mobile MCP server (tools named mobile_*, such as mobile_tap or mcp__mobile__mobile_tap). Use when asked to open, tap, type, swipe, screenshot, install, launch, or check an app on a simulator, emulator, or real phone, to reproduce a mobile UI bug, or to set up the mobile MCP server in Pi, Claude Code, or Codex. Prefer it over running xcrun simctl, xcrun devicectl, or adb directly.
 ---
 
 # Mobile MCP
@@ -32,7 +32,7 @@ Physical iPhone or iPad: the server also needs `MOBILE_MCP_IOS_TEAM_ID=<Apple te
 ## 3. Work loop
 
 1. `mobile_doctor`, then `mobile_list_devices`. Reuse the exact returned `id`.
-2. `mobile_list_apps` for bundle IDs or package names. NEVER guess them.
+2. `mobile_list_apps` for bundle IDs or package names; pass `includeSystem: true` for built-in apps such as Settings. NEVER guess them.
 3. Read before acting: `mobile_list_elements` (pass `query` for one element). Use `mobile_take_screenshot` for visual checks.
 4. Act with `mobile_tap_element`, `mobile_tap`, `mobile_swipe`, `mobile_type_text`, or `mobile_press_key`.
 5. After each action, `mobile_wait_for_element` for the expected result. Use `mobile_scroll_to_element` for off-screen items. Do not sleep.
