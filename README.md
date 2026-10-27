@@ -59,8 +59,10 @@ The first iOS UI call can take several minutes, and Pi's default per-request tim
 ### Claude Code
 
 ```bash
-claude mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp
+claude mcp add --scope user mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp
 ```
+
+`--scope user` makes the server available in every project. Without it, Claude Code adds it to the current project only.
 
 ### Codex
 
@@ -68,7 +70,14 @@ claude mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simul
 codex mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp
 ```
 
-For a physical iPhone or iPad, also pass your Apple team ID: `--env MOBILE_MCP_IOS_TEAM_ID=<TEAM_ID>` for Pi and Codex, or `-e MOBILE_MCP_IOS_TEAM_ID=<TEAM_ID>` for Claude Code. Put it before `--`.
+Codex stops a tool call after 60 seconds and a server start after 10 seconds by default. The first iOS UI call and the first server start take longer. In `~/.codex/config.toml`, add these two lines directly under the `[mcp_servers.mobile]` table that the command created:
+
+```toml
+tool_timeout_sec = 300
+startup_timeout_sec = 120
+```
+
+For a physical iPhone or iPad, also pass your Apple team ID with `--env MOBILE_MCP_IOS_TEAM_ID=<TEAM_ID>`. Put it after the server name `mobile` and before `--`; all three CLIs accept this order.
 
 ### Other MCP clients
 
@@ -152,7 +161,7 @@ Restart the agent, or run `/reload` in Pi.
 1. Connect the server with the command for your agent (see [Connect your agent](#connect-your-agent)).
 2. Install the skill.
 3. Ask for the task in plain words, for example: "Open Settings on my connected iPhone and take a screenshot." The agent loads the skill when the task matches.
-4. To force the skill, start the request with `/skill:mobile-mcp` in Pi or `/mobile-mcp` in Claude Code. In Codex, name the skill in your request ("use the mobile-mcp skill").
+4. To force the skill, start the request with `/skill:mobile-mcp` in Pi or `/mobile-mcp` in Claude Code. In Codex, type `$mobile-mcp` or pick it from `/skills`.
 
 With the skill, the agent checks that the `mobile` tools exist (and gives you the setup command if not), reads the server instructions, and asks you before it installs, uninstalls, or resets anything on a real phone.
 
