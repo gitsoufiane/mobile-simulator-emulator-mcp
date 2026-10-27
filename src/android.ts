@@ -9,8 +9,15 @@ export interface AndroidDevice {
 	name: string;
 	platform: "android";
 	state: "online" | "offline" | "shutdown";
+	physical: boolean;
 	version?: string;
 	avd?: string;
+}
+
+const EMULATOR_SERIAL = /^emulator-\d+$/u;
+
+export function isEmulatorSerial(serial: string): boolean {
+	return EMULATOR_SERIAL.test(serial);
 }
 
 export const KEYCODES = {
@@ -181,6 +188,10 @@ export class AndroidController {
 
 	/** The emulator console exits 0 and prints `KO: <reason>` on failure. */
 	private async emu(serial: string, args: readonly string[], timeoutMs = 30_000) {
+		if (!isEmulatorSerial(serial))
+			throw new Error(
+				`android:${serial} is a physical device; "${args[0] ?? "emu"}" works only on Android Emulators`,
+			);
 		const result = await this.command(serial, ["emu", ...args], timeoutMs);
 		const failure = /^KO:\s*(.*)$/mu.exec(result.stdout)?.[1];
 		if (failure !== undefined)
@@ -210,7 +221,7 @@ export class AndroidController {
 			.split(/\r?\n/u)
 			.slice(1)
 			.flatMap((line) => {
-				const match = /^(emulator-\d+)\s+(\S+)(?:\s+(.*))?$/u.exec(line.trim());
+				const match = /^(\S+)\s+(\S+)(?:\s+(.*))?$/u.exec(line.trim());
 				return match?.[1] && match[2]
 					? [{ serial: match[1], state: match[2], details: match[3] ?? "" }]
 					: [];
@@ -259,6 +270,7 @@ export class AndroidController {
 					platform: "android" as const,
 					state:
 						state === "device" ? ("online" as const) : ("offline" as const),
+					physical: !isEmulatorSerial(serial),
 					...(version ? { version } : {}),
 					...(avd ? { avd } : {}),
 				};
@@ -276,6 +288,7 @@ export class AndroidController {
 					name,
 					platform: "android",
 					state: "shutdown",
+					physical: false,
 					avd: name,
 				}),
 			);

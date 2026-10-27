@@ -24,27 +24,42 @@ import {
 	validateUrl,
 } from "../src/server.js";
 
-test("accepts only simulator and emulator device IDs", () => {
+test("parses virtual and physical device IDs", () => {
 	assert.deepEqual(parseOnlineDevice("android:emulator-5554"), {
 		platform: "android",
 		target: "emulator-5554",
+		physical: false,
 	});
+	for (const serial of ["R58M12345AB", "192.168.1.20:5555", "adb-R58M-x._adb-tls-connect._tcp"])
+		assert.deepEqual(parseOnlineDevice(`android:${serial}`), {
+			platform: "android",
+			target: serial,
+			physical: true,
+		});
 	assert.deepEqual(
 		parseOnlineDevice("ios:A8627257-2D08-47F0-A65B-C17F017A71CD"),
 		{
 			platform: "ios",
 			target: "A8627257-2D08-47F0-A65B-C17F017A71CD",
+			physical: false,
 		},
 	);
+	assert.deepEqual(parseOnlineDevice("ios:00008030-001A2B3C4D5E6F70"), {
+		platform: "ios",
+		target: "00008030-001A2B3C4D5E6F70",
+		physical: true,
+	});
 	assert.deepEqual(parseBootDevice("android-avd:Pixel_9a"), {
 		platform: "android",
 		target: "Pixel_9a",
 	});
-	assert.throws(
-		() => parseOnlineDevice("android:physical-device"),
-		/Invalid online device ID/u,
-	);
+	for (const bad of ["android:-s", "android:a b", "android:a;rm", "ios:not-a-udid"])
+		assert.throws(() => parseOnlineDevice(bad), /Invalid online device ID/u);
 	assert.throws(() => parseBootDevice("android:emulator-5554"), /android-avd/u);
+	assert.throws(
+		() => parseBootDevice("ios:00008030-001A2B3C4D5E6F70"),
+		/cannot be booted/u,
+	);
 });
 
 test("validates platform-specific app identifiers", () => {

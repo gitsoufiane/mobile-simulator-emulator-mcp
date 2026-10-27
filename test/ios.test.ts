@@ -3,9 +3,13 @@ import { test } from "node:test";
 import { CommandError } from "../src/exec.js";
 import {
 	isAlreadyTerminated,
+	isPhysicalIosUdid,
+	lowerVersion,
 	parseIosApps,
 	parseIosDevices,
 	parseIosExecutable,
+	parsePhysicalIosApps,
+	parsePhysicalIosDevices,
 	summarizeIosCrash,
 	type SimctlList,
 } from "../src/ios.js";
@@ -93,9 +97,65 @@ test("lists only available iOS simulator runtimes", () => {
 			name: "iPhone",
 			platform: "ios",
 			state: "online",
+			physical: false,
 			version: "26.3",
 		},
 	]);
+});
+
+test("lists only physical iOS devices from devicectl", () => {
+	// Shape taken from `xcrun devicectl list devices --json-output` on Xcode 27.
+	const hardware = (udid: string, reality: string, platform = "iOS") => ({
+		udid,
+		reality,
+		platform,
+		marketingName: "iPhone 17",
+	});
+	const devices = parsePhysicalIosDevices([
+		{
+			connectionProperties: { pairingState: "paired" },
+			hardwareProperties: hardware("00008030-001A2B3C4D5E6F70", "physical"),
+			deviceProperties: { name: "Test Phone", osVersionNumber: "27.2", bootState: "booted" },
+		},
+		{
+			connectionProperties: { pairingState: "unpaired" },
+			hardwareProperties: hardware("a".repeat(40), "physical"),
+			deviceProperties: { osVersionNumber: "16.7", bootState: "booted" },
+		},
+		{ hardwareProperties: hardware("311FAA01-086F-4DDF-BEC5-BEB4D86623AF", "simulated") },
+		{ hardwareProperties: hardware("00008030-001A2B3C4D5E6F71", "physical", "watchOS") },
+	]);
+	assert.deepEqual(devices, [
+		{
+			id: "ios:00008030-001A2B3C4D5E6F70",
+			name: "Test Phone",
+			platform: "ios",
+			state: "online",
+			physical: true,
+			version: "27.2",
+		},
+		{
+			id: `ios:${"a".repeat(40)}`,
+			name: "iPhone 17",
+			platform: "ios",
+			state: "offline",
+			physical: true,
+			version: "16.7",
+		},
+	]);
+	assert.equal(isPhysicalIosUdid("A8627257-2D08-47F0-A65B-C17F017A71CD"), false);
+});
+
+test("separates user apps from Apple default apps on a physical device", () => {
+	const apps = [
+		{ bundleIdentifier: "com.apple.calculator", name: "Calculator", defaultApp: true, removable: true },
+		{ bundleIdentifier: "com.apple.assistivetouchd", defaultApp: false, removable: false },
+		{ bundleIdentifier: "com.example.app", name: "Example", defaultApp: false, removable: true },
+	];
+	assert.deepEqual(parsePhysicalIosApps(apps, false), [
+		{ appId: "com.example.app", name: "Example", system: false },
+	]);
+	assert.equal(parsePhysicalIosApps(apps, true).length, 3);
 });
 
 test("summarizes only crash reports from the requested app and Simulator", () => {
@@ -133,4 +193,11 @@ test("summarizes only crash reports from the requested app and Simulator", () =>
 		undefined,
 	);
 	assert.equal(summarizeIosCrash("Incident Identifier: legacy text", "com.example.app", udid), undefined);
+});
+
+test("picks the lower version so the WDA build target fits the installed SDK", () => {
+	assert.equal(lowerVersion("27.2", "27.1"), "27.1");
+	assert.equal(lowerVersion("26.3", "27.1"), "26.3");
+	assert.equal(lowerVersion("27", "27.0"), "27");
+	assert.equal(lowerVersion("17.10", "17.9"), "17.9");
 });

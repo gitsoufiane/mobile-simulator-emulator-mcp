@@ -16,6 +16,7 @@ import {
 	ANDROID_SENSORS,
 	AndroidController,
 	type AndroidKey,
+	isEmulatorSerial,
 	KEYCODES,
 } from "./android.js";
 import {
@@ -25,8 +26,8 @@ import {
 	type UiElement,
 } from "./elements.js";
 import { run, sleep, tailLines } from "./exec.js";
-import { IosController } from "./ios.js";
-import { WdaController } from "./wda.js";
+import { IosController, isPhysicalIosUdid } from "./ios.js";
+import { WdaController, type WdaTarget } from "./wda.js";
 
 function packageVersion(): string {
 	// Compiled to dist/src/, so the package manifest is two levels up.
@@ -45,15 +46,17 @@ function packageVersion(): string {
 }
 
 const VERSION = packageVersion();
-const INSTRUCTIONS = `Controls local iOS Simulators and Android Emulators for app testing. Physical devices are rejected.
+const INSTRUCTIONS = `Controls local iOS Simulators, Android Emulators, and physical iPhones, iPads, and Android phones connected to this Mac, for app testing.
 
-Call mobile_doctor first, then mobile_list_devices, and reuse the exact returned ID (ios:<UDID>, android:emulator-5554, or android-avd:<name>) in every later call.
+Call mobile_doctor first, then mobile_list_devices, and reuse the exact returned ID (ios:<UDID>, android:<serial> such as android:emulator-5554, or android-avd:<name>) in every later call. Entries with physical: true are real devices.
+Physical devices support apps, screenshots, UI reading, taps, swipes, typing, and keys. Tools that need simulator or emulator features (boot, shutdown, erase, push, clipboard, status bar, permissions, location, media, SMS, sensors, snapshots, and similar) report that in their error. A physical iOS device needs Developer Mode, a trusted pairing, and MOBILE_MCP_IOS_TEAM_ID so Xcode can sign WebDriverAgent; if WebDriverAgent fails to start, the device must be unlocked and trust the developer certificate in Settings > General > VPN & Device Management.
+
 Discover app identifiers with mobile_list_apps instead of guessing bundle IDs or package names.
 Read the screen before acting: mobile_list_elements returns compact elements with tap-ready center coordinates (pass query to find one element); use mobile_take_screenshot for visual context and mobile_get_ui_tree only when the full native hierarchy is needed. Then use mobile_tap, mobile_long_press, mobile_swipe, or mobile_type_text, and re-read after every state-changing action.
 After a launch, tap, or navigation, call mobile_wait_for_element instead of sleeping or polling. To reach an element below or beside the visible area, call mobile_scroll_to_element.
 
 The first iOS UI call builds and launches WebDriverAgent through Xcode and can take several minutes; later iOS calls reuse that process.
-Destructive tools (install, uninstall, reset, erase, permission changes) run without extra confirmation, so target only disposable app and device state.
+Destructive tools (install, uninstall, reset, erase, permission changes) run without extra confirmation, so target only disposable app and device state. On a physical device they change real data on that phone.
 Prefer mobile_tap_element (by label) over raw coordinates. On iOS, clear permission prompts and other system alerts with mobile_handle_alert.
 Platform coverage differs: clipboard, push, status bar, alerts, Face ID (mobile_simulate_biometric), keychain, accessibility audit, and location routes are iOS-only; SMS, fingerprint, battery, network profiles, connectivity, snapshots, phone calls, sensors, proxy, and mobile_rotate are Android-only. Each tool reports the unsupported platform in its error message.`;
 const TEXT_LIMIT = 1_000_000;
@@ -62,7 +65,8 @@ const SCROLL_SWIPE_MS = 400;
 const SCROLL_MAX_SWIPES = 10;
 const IOS_UUID =
 	/^[0-9A-F]{8}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{4}-[0-9A-F]{12}$/iu;
-const ANDROID_SERIAL = /^emulator-\d{4}$/u;
+// USB serials, Wi-Fi host:port, and mDNS names such as adb-X._adb-tls-connect._tcp.
+const ANDROID_SERIAL = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/u;
 const AVD_NAME = /^[A-Za-z0-9._-]{1,100}$/u;
 const IOS_APP_ID = /^[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)+$/u;
 const ANDROID_APP_ID = /^[A-Za-z_][A-Za-z0-9_]*(?:\.[A-Za-z_][A-Za-z0-9_]*)+$/u;
@@ -139,6 +143,7 @@ const IOS_PRIVACY_SERVICES = new Set([
 interface OnlineDevice {
 	platform: "ios" | "android";
 	target: string;
+	physical: boolean;
 }
 
 interface BootDevice {
@@ -169,11 +174,15 @@ interface ServerOptions {
 export function parseOnlineDevice(id: string): OnlineDevice {
 	if (id.startsWith("ios:")) {
 		const target = id.slice(4);
-		if (IOS_UUID.test(target)) return { platform: "ios", target };
+		if (IOS_UUID.test(target))
+			return { platform: "ios", target, physical: false };
+		if (isPhysicalIosUdid(target))
+			return { platform: "ios", target, physical: true };
 	}
 	if (id.startsWith("android:")) {
 		const target = id.slice(8);
-		if (ANDROID_SERIAL.test(target)) return { platform: "android", target };
+		if (ANDROID_SERIAL.test(target))
+			return { platform: "android", target, physical: !isEmulatorSerial(target) };
 	}
 	throw new Error(
 		`Invalid online device ID "${id}". Use mobile_list_devices for current IDs.`,
@@ -188,6 +197,8 @@ export function parseBootDevice(id: string): BootDevice {
 	const online = parseOnlineDevice(id);
 	if (online.platform !== "ios")
 		throw new Error("Boot Android devices with an android-avd:<name> ID");
+	if (online.physical)
+		throw new Error("Physical iOS devices cannot be booted from here");
 	return online;
 }
 
@@ -340,7 +351,7 @@ export async function validateAppPath(
 		platform === "ios" &&
 		(!info.isDirectory() || !candidate.toLowerCase().endsWith(".app"))
 	) {
-		throw new Error("iOS Simulator installs require an .app directory");
+		throw new Error("iOS installs require an .app directory");
 	}
 	return candidate;
 }
@@ -487,13 +498,18 @@ export function createMobileServer(options: ServerOptions = {}): {
 			};
 		});
 
-	const getBootedIosVersion = async (udid: string): Promise<string> => {
+	const resolveWdaTarget = async (udid: string): Promise<WdaTarget> => {
 		const device = await ios.getDevice(udid);
-		if (device.state !== "online") throw new Error(`ios:${udid} is not booted`);
-		return device.version;
+		if (device.state !== "online") throw new Error(`ios:${udid} is ${device.state}`);
+		return device.physical
+			? {
+					platformVersion: await ios.deviceBuildVersion(device.version),
+					tunnelAddress: await ios.tunnelAddress(udid),
+				}
+			: { platformVersion: device.version };
 	};
 	const useWda = <T>(udid: string, operation: () => Promise<T>): Promise<T> =>
-		wda.use(udid, () => getBootedIosVersion(udid), operation);
+		wda.use(udid, () => resolveWdaTarget(udid), operation);
 
 	const deviceSchema = z
 		.string()
@@ -509,6 +525,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		name: z.string(),
 		platform: platformSchema,
 		state: z.string(),
+		physical: z.boolean(),
 		version: z.string().optional(),
 		avd: z.string().optional(),
 	});
@@ -543,7 +560,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		{
 			title: "List Mobile Devices",
 			description:
-				"List available iOS Simulators, running Android Emulators, and configured Android virtual devices. Physical devices are excluded.",
+				"List iOS Simulators, Android Emulators, configured Android virtual devices, and connected physical iPhones, iPads, and Android phones (physical: true).",
 			inputSchema: z.object({}).strict(),
 			outputSchema: z.object({
 				devices: z.array(deviceEntrySchema),
@@ -620,7 +637,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		{
 			title: "Shut Down Mobile Device",
 			description:
-				"Shut down a running iOS Simulator or Android Emulator without deleting its data.",
+				"Shut down a running iOS Simulator or Android Emulator without deleting its data. Physical devices are not supported.",
 			inputSchema: z.object({ device: deviceSchema }).strict(),
 			outputSchema: z.object({
 				device: z.string(),
@@ -635,6 +652,8 @@ export function createMobileServer(options: ServerOptions = {}): {
 		},
 		safe(async ({ device }) => {
 			const target = parseOnlineDevice(device);
+			if (target.physical)
+				throw new Error(`${device} is a physical device; shut it down on the device itself`);
 			if (target.platform === "ios") {
 				if (wda.isBoundTo(target.target)) await wda.close();
 				await ios.shutdown(target.target);
@@ -650,7 +669,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		{
 			title: "Install Mobile App",
 			description:
-				"Install an APK on an Android Emulator or an .app directory on an iOS Simulator. Paths are confined beneath MOBILE_MCP_APP_ROOT.",
+				"Install an APK on an Android device, an .app directory on an iOS Simulator, or a device-signed .app on a physical iOS device. Paths are confined beneath MOBILE_MCP_APP_ROOT.",
 			inputSchema: z
 				.object({ device: deviceSchema, path: z.string().min(1).max(2_048) })
 				.strict(),
@@ -1726,11 +1745,13 @@ export function createMobileServer(options: ServerOptions = {}): {
 			}
 			if (orientation === "auto")
 				throw new Error("orientation auto is Android-only");
-			try {
-				await ios.setOrientation(target.target, orientation);
-				return jsonResult({ device, orientation });
-			} catch (error) {
-				if (!String(error).includes("needs Xcode 27")) throw error;
+			if (!target.physical) {
+				try {
+					await ios.setOrientation(target.target, orientation);
+					return jsonResult({ device, orientation });
+				} catch (error) {
+					if (!String(error).includes("needs Xcode 27")) throw error;
+				}
 			}
 			await useWda(target.target, () =>
 				wda.setOrientation(IOS_ORIENTATIONS[orientation]),
@@ -1750,7 +1771,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		{
 			title: "Open Mobile URL",
 			description:
-				"Open an http/https URL or an explicitly allowed deep-link scheme on a simulator or emulator.",
+				"Open an http/https URL or an explicitly allowed deep-link scheme on a device.",
 			inputSchema: z
 				.object({ device: deviceSchema, url: z.string().min(1).max(2_048) })
 				.strict(),
@@ -1765,9 +1786,11 @@ export function createMobileServer(options: ServerOptions = {}): {
 		safe(async ({ device, url }) => {
 			const target = parseOnlineDevice(device);
 			const checkedUrl = validateUrl(url);
-			if (target.platform === "ios")
-				await ios.openUrl(target.target, checkedUrl);
-			else await android.openUrl(target.target, checkedUrl);
+			if (target.platform === "android")
+				await android.openUrl(target.target, checkedUrl);
+			else if (target.physical)
+				await useWda(target.target, () => wda.openUrl(checkedUrl));
+			else await ios.openUrl(target.target, checkedUrl);
 			return jsonResult({ device, opened: checkedUrl });
 		}),
 	);
@@ -1777,7 +1800,7 @@ export function createMobileServer(options: ServerOptions = {}): {
 		{
 			title: "Take Mobile Screenshot",
 			description:
-				"Capture the current simulator or emulator screen as a PNG image returned directly to the MCP client.",
+				"Capture the current device screen as a PNG image returned directly to the MCP client.",
 			inputSchema: z.object({ device: deviceSchema }).strict(),
 			annotations: {
 				readOnlyHint: true,
@@ -1789,9 +1812,11 @@ export function createMobileServer(options: ServerOptions = {}): {
 		safe(async ({ device }) => {
 			const target = parseOnlineDevice(device);
 			const image =
-				target.platform === "ios"
-					? await ios.screenshot(target.target)
-					: await android.screenshot(target.target);
+				target.platform === "android"
+					? await android.screenshot(target.target)
+					: target.physical
+						? await useWda(target.target, () => wda.screenshot())
+						: await ios.screenshot(target.target);
 			assertPng(image);
 			return {
 				content: [

@@ -9,7 +9,7 @@ Build a local MCP server that lets an agent discover and control Apple iOS Simul
 - Use the official `@modelcontextprotocol/sdk` v1 API with strict Zod schemas.
 - Use Apple `xcrun simctl` and Google `adb`/`emulator` through `execFile` argument arrays; never expose arbitrary shell execution.
 - Use Appium's open-source `appium-webdriveragent` package only to build and keep WebDriverAgent running. Talk to WDA over loopback with `fetch` for iOS taps, swipes, typing, screenshots, and UI source.
-- Support simulators/emulators only. Reject physical devices.
+- Support simulators, emulators, and connected physical devices. Physical iOS uses `devicectl` for apps and WDA over the CoreDevice tunnel for UI; simulator-only and emulator-console tools refuse physical targets.
 - Use stable device IDs: `ios:<UDID>`, `android:<serial>`, and `android-avd:<name>`.
 - Keep one iOS WDA session on loopback port 8100. Android remains independently usable at the same time.
 
@@ -77,7 +77,7 @@ Build a local MCP server that lets an agent discover and control Apple iOS Simul
 - Per-command timeouts and output caps.
 - Media and app install paths are confined beneath `MOBILE_MCP_APP_ROOT` by one shared resolver, with an extension allowlist for media.
 - Strict identifiers, coordinates, durations, URL schemes, and local app paths.
-- Every Android command targets an explicit emulator serial with `adb -s`.
+- Every Android command targets an explicit serial with `adb -s`.
 - Only `http`, `https`, or explicitly configured deep-link schemes may be opened.
 - No telemetry, credentials, arbitrary host paths for output, arbitrary ADB shell, or arbitrary `simctl spawn`.
 - Curated destructive operations execute without per-call confirmation; the local MCP client configuration is the trust boundary.

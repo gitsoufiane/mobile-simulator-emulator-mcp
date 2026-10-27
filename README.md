@@ -13,7 +13,8 @@ Your coding agent can open, tap, type, scroll, and check apps on a local device,
 - **55 tools** for apps, screen actions, screenshots, logs, location, permissions, and device settings.
 - **Finds buttons by their text**, so the agent does not guess screen positions.
 - **Waits and scrolls for you** with `mobile_wait_for_element` and `mobile_scroll_to_element`.
-- **Local and safe**: simulators and emulators only, no shell access, no telemetry.
+- **Real phones too**: iPhones, iPads, and Android phones connected to your Mac (see [Physical devices](#physical-devices)).
+- **Local and safe**: no shell access, no telemetry.
 
 ## How it works
 
@@ -21,8 +22,10 @@ Your coding agent can open, tap, type, scroll, and check apps on a local device,
 | --- | --- |
 | iOS Simulator | `xcrun simctl` and [Appium WebDriverAgent](https://github.com/appium/WebDriverAgent) |
 | Android Emulator | Google `adb` and `emulator` |
+| Physical iPhone or iPad | `xcrun devicectl` and WebDriverAgent over the CoreDevice tunnel |
+| Physical Android phone | Google `adb` |
 
-It runs over stdio. Add `--listen` for HTTP on your own machine only. Physical devices are rejected.
+It runs over stdio. Add `--listen` for HTTP on your own machine only.
 
 ## Requirements
 
@@ -172,7 +175,7 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | Tool | Purpose |
 |---|---|
 | `mobile_doctor` | Check native tools, device counts, and WDA status |
-| `mobile_list_devices` | List iOS Simulators, running Android Emulators, and configured AVDs |
+| `mobile_list_devices` | List iOS Simulators, Android Emulators, configured AVDs, and connected physical devices |
 | `mobile_boot_device` | Boot and wait for an iOS Simulator or Android AVD |
 | `mobile_shutdown_device` | Shut down a running target without deleting data |
 | `mobile_install_app` | Install `.app` or `.apk` artifacts from the active project root |
@@ -227,10 +230,25 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | `mobile_type_text` | Type into the focused field |
 | `mobile_press_key` | Press HOME/BACK/ENTER/app-switch/volume keys as supported; Android `NOTIFICATIONS` opens the shade |
 
+## Physical devices
+
+`mobile_list_devices` marks real devices with `physical: true`. They support app install, launch, terminate, uninstall, and app lists, plus screenshots, UI reading, taps, swipes, typing, keys, alerts, orientation, and URLs. Tools that need simulator or emulator features (boot, shutdown, erase, push, clipboard, status bar, permissions, location, media, SMS, sensors, snapshots, and similar) return a clear error.
+
+**Android**: turn on USB debugging, connect by USB or `adb pair`/`adb connect`, and accept the prompt on the phone.
+
+**iPhone or iPad** (Xcode 15 or newer):
+
+1. Turn on Developer Mode on the device, connect it, and trust this Mac.
+2. Set `MOBILE_MCP_IOS_TEAM_ID` to your Apple Developer team ID. A free Personal Team works.
+3. The first UI call builds, signs, and installs WebDriverAgent on the device. Xcode registers the bundle ID `local.mobilemcp.<TEAM_ID>.WebDriverAgentRunner` in that team.
+4. On the device, open Settings > General > VPN & Device Management and trust the developer certificate. Keep the device unlocked.
+
+WebDriverAgent listens only on the private CoreDevice tunnel address, not on your Wi-Fi network. Physical installs need a device-signed `.app`.
+
 ## Device IDs
 
-- Booted iOS: `ios:<simulator-UDID>`
-- Running Android: `android:emulator-5554`
+- iOS Simulator or device: `ios:<UDID>`
+- Running Android emulator or phone: `android:<serial>`, such as `android:emulator-5554`
 - Shutdown Android AVD: `android-avd:<AVD-name>`
 
 Always use IDs from the latest `mobile_list_devices` result.
@@ -242,6 +260,7 @@ Always use IDs from the latest `mobile_list_devices` result.
 | `MOBILE_MCP_APP_ROOT` | MCP process working directory | Apps, media, and certificates are read, and recordings are written, only beneath this directory |
 | `MOBILE_MCP_URL_SCHEMES` | empty | Comma-separated extra deep-link schemes; `http` and `https` are always allowed |
 | `MOBILE_MCP_SHOW_XCODE_LOG` | `0` | Set to `1` for verbose Xcode/WDA diagnostics on stderr |
+| `MOBILE_MCP_IOS_TEAM_ID` | none | Apple Developer team ID that signs WebDriverAgent for physical iOS devices |
 | `ANDROID_SDK_ROOT` / `ANDROID_HOME` | executable lookup | Android SDK location |
 
 ## Security model
@@ -249,8 +268,9 @@ Always use IDs from the latest `mobile_list_devices` result.
 - stdio by default. The optional `--listen` HTTP transport binds to `127.0.0.1` only and rejects non-loopback `Host`/`Origin` headers (DNS-rebinding protection). There is no remote listener or authentication surface.
 - No arbitrary shell, `adb shell`, or `simctl spawn` tool is exposed.
 - Native commands use argument arrays, explicit Android serials, timeouts, and output limits.
-- Physical devices, device creation/deletion, raw native-command passthrough, and arbitrary host shell access are not supported.
-- Curated destructive operations—including app reset/uninstall and iOS Simulator erase—execute without per-call confirmation. The MCP client configuration is the trust boundary.
+- Device creation/deletion, raw native-command passthrough, and arbitrary host shell access are not supported.
+- Curated destructive operations—including app reset/uninstall and iOS Simulator erase—execute without per-call confirmation. The MCP client configuration is the trust boundary. On a physical device these change real data on that phone.
+- Emulator-console and simulator-only commands are refused before they reach a physical device.
 - URL schemes, device identifiers, app IDs, permissions, coordinates, environment profiles, durations, push payloads, locales, launch environment names, intent-extra keys, proxy addresses, snapshot names, and file paths are validated.
 - Recordings are written only as new `.mp4` files inside an existing directory beneath `MOBILE_MCP_APP_ROOT`; existing files are never overwritten.
 - The Android emulator console reports failures as `KO:` with exit code 0. Every console call checks for it, so a rejected command is an error, never a silent success.

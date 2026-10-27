@@ -27,6 +27,31 @@ const DEVICECTL_ORIENTATIONS: Record<IosOrientation, string> = {
 
 const CRASH_FRAME_LIMIT = 25;
 
+/** Real iPhone and iPad UDIDs: `00008030-001A2B3C4D5E6F70` or 40 hex digits. */
+const PHYSICAL_IOS_UDID = /^(?:[0-9A-F]{8}-[0-9A-F]{16}|[0-9A-F]{40})$/iu;
+
+/** The lower of two dotted versions; non-numeric parts compare as 0. */
+export function lowerVersion(left: string, right: string): string {
+	const parts = (value: string) => value.split(".").map((part) => Number(part) || 0);
+	const [a, b] = [parts(left), parts(right)];
+	for (let index = 0; index < Math.max(a.length, b.length); index += 1) {
+		const difference = (a[index] ?? 0) - (b[index] ?? 0);
+		if (difference !== 0) return difference < 0 ? left : right;
+	}
+	return left;
+}
+
+export function isPhysicalIosUdid(udid: string): boolean {
+	return PHYSICAL_IOS_UDID.test(udid);
+}
+
+function assertSimulator(udid: string): void {
+	if (isPhysicalIosUdid(udid))
+		throw new Error(
+			`ios:${udid} is a physical device; this control works only on iOS Simulators`,
+		);
+}
+
 /**
  * Summarizes one `.ips` crash report if it belongs to `bundleId` on the
  * Simulator `udid`. Simulator crashes land in the host DiagnosticReports
@@ -102,8 +127,60 @@ export interface IosDevice {
 	id: string;
 	name: string;
 	platform: "ios";
-	state: "online" | "shutdown";
+	state: "online" | "offline" | "shutdown";
+	physical: boolean;
 	version: string;
+}
+
+/** One entry of `devicectl list devices`; these fields exist from Xcode 15 on. */
+interface DevicectlDevice {
+	connectionProperties?: { pairingState?: string };
+	hardwareProperties?: { udid?: string; platform?: string; reality?: string; marketingName?: string };
+	deviceProperties?: { name?: string; osVersionNumber?: string; bootState?: string };
+}
+
+export function parsePhysicalIosDevices(devices: readonly DevicectlDevice[]): IosDevice[] {
+	return devices.flatMap(({ connectionProperties, hardwareProperties, deviceProperties }) => {
+		const udid = hardwareProperties?.udid;
+		if (hardwareProperties?.reality !== "physical" || hardwareProperties.platform !== "iOS" || !udid)
+			return [];
+		return [
+			{
+				id: `ios:${udid}`,
+				name: deviceProperties?.name ?? hardwareProperties.marketingName ?? udid,
+				platform: "ios" as const,
+				state:
+					connectionProperties?.pairingState === "paired" &&
+					deviceProperties?.bootState === "booted"
+						? ("online" as const)
+						: ("offline" as const),
+				physical: true,
+				version: deviceProperties?.osVersionNumber ?? "unknown",
+			},
+		];
+	});
+}
+
+interface DevicectlApp {
+	bundleIdentifier?: string;
+	name?: string;
+	defaultApp?: boolean;
+	removable?: boolean;
+	url?: string;
+}
+
+export function parsePhysicalIosApps(
+	apps: readonly DevicectlApp[],
+	includeSystem: boolean,
+): MobileApp[] {
+	return apps
+		.flatMap((app) => {
+			if (!app.bundleIdentifier) return [];
+			const system = app.defaultApp === true || app.removable === false;
+			if (system && !includeSystem) return [];
+			return [{ appId: app.bundleIdentifier, name: app.name || app.bundleIdentifier, system }];
+		})
+		.sort((left, right) => left.appId.localeCompare(right.appId));
 }
 
 /** Cross-platform installed-app record shared with the Android controller. */
@@ -176,6 +253,7 @@ export function parseIosDevices(parsed: SimctlList): IosDevice[] {
 								device.state === "Booted"
 									? ("online" as const)
 									: ("shutdown" as const),
+							physical: false,
 							version: runtimeVersion(runtime),
 						},
 					],
@@ -190,6 +268,8 @@ export class IosController {
 		maxBuffer = 2 * 1024 * 1024,
 		input?: string,
 	) {
+		// Safety net: every simctl subcommand here takes the target UDID.
+		for (const arg of args) assertSimulator(arg);
 		return run("xcrun", ["simctl", ...args], {
 			timeoutMs,
 			maxBuffer,
@@ -197,7 +277,58 @@ export class IosController {
 		});
 	}
 
+	private async devicectlJson<T>(args: readonly string[]): Promise<T> {
+		const output = join(tmpdir(), `mobile-mcp-${randomUUID()}.json`);
+		try {
+			await run("xcrun", ["devicectl", ...args, "--quiet", "--json-output", output], {
+				timeoutMs: 60_000,
+			});
+			return (JSON.parse(await readFile(output, "utf8")) as { result: T }).result;
+		} finally {
+			// safe to ignore: temp cleanup must not hide the devicectl result.
+			await unlink(output).catch(() => undefined);
+		}
+	}
+
+	async listPhysicalDevices(): Promise<IosDevice[]> {
+		const { devices } = await this.devicectlJson<{ devices?: DevicectlDevice[] }>([
+			"list",
+			"devices",
+		]);
+		return parsePhysicalIosDevices(devices ?? []);
+	}
+
+	/**
+	 * Deployment target for building WDA onto a device. A device may run a
+	 * newer iOS than the installed SDK, and xcodebuild rejects such a target.
+	 */
+	async deviceBuildVersion(deviceVersion: string): Promise<string> {
+		const { stdout } = await run("xcrun", ["--sdk", "iphoneos", "--show-sdk-version"]);
+		return lowerVersion(deviceVersion, stdout.trim());
+	}
+
+	/** IPv6 address of the CoreDevice tunnel; devicectl brings the tunnel up first. */
+	async tunnelAddress(udid: string): Promise<string> {
+		const details = await this.devicectlJson<{
+			connectionProperties?: { tunnelIPAddress?: string };
+		}>(["device", "info", "details", "--device", udid]);
+		const address = details.connectionProperties?.tunnelIPAddress;
+		if (!address)
+			throw new Error(
+				`ios:${udid} has no CoreDevice tunnel. Connect it by USB or the same network, unlock it, and trust this Mac.`,
+			);
+		return address;
+	}
+
 	async listDevices(): Promise<IosDevice[]> {
+		const [simulators, physical] = await Promise.all([
+			this.listSimulators(),
+			this.listPhysicalDevices(),
+		]);
+		return [...simulators, ...physical];
+	}
+
+	private async listSimulators(): Promise<IosDevice[]> {
 		const { stdout } = await this.simctl(["list", "devices", "--json"]);
 		let parsed: SimctlList;
 		try {
@@ -211,10 +342,11 @@ export class IosController {
 	}
 
 	async getDevice(udid: string): Promise<IosDevice> {
-		const found = (await this.listDevices()).find(
-			(device) => device.id === `ios:${udid}`,
-		);
-		if (!found) throw new Error(`iOS Simulator ${udid} is not available`);
+		const devices = isPhysicalIosUdid(udid)
+			? await this.listPhysicalDevices()
+			: await this.listSimulators();
+		const found = devices.find((device) => device.id === `ios:${udid}`);
+		if (!found) throw new Error(`ios:${udid} is not available`);
 		return found;
 	}
 
@@ -230,7 +362,11 @@ export class IosController {
 	}
 
 	async install(udid: string, appPath: string): Promise<void> {
-		await this.simctl(["install", udid, appPath], 120_000);
+		if (isPhysicalIosUdid(udid))
+			await run("xcrun", ["devicectl", "device", "install", "app", "--device", udid, appPath], {
+				timeoutMs: 300_000,
+			});
+		else await this.simctl(["install", udid, appPath], 120_000);
 	}
 
 	async launch(
@@ -251,6 +387,28 @@ export class IosController {
 					options.locale.replaceAll("-", "_"),
 				]
 			: [];
+		if (isPhysicalIosUdid(udid)) {
+			await run(
+				"xcrun",
+				[
+					"devicectl",
+					"device",
+					"process",
+					"launch",
+					"--device",
+					udid,
+					"--terminate-existing",
+					...(options.environment
+						? ["--environment-variables", JSON.stringify(options.environment)]
+						: []),
+					bundleId,
+					...localeArgs,
+					...(options.arguments ?? []),
+				],
+				{ timeoutMs: 60_000 },
+			);
+			return;
+		}
 		// simctl forwards SIMCTL_CHILD_<NAME> host variables to the launched app.
 		const childEnv = Object.fromEntries(
 			Object.entries(options.environment ?? {}).map(([key, value]) => [
@@ -275,6 +433,7 @@ export class IosController {
 
 	/** CoreDevice control; Xcode 27 `devicectl` also drives Simulators. */
 	private async devicectl(udid: string, args: readonly string[]): Promise<void> {
+		assertSimulator(udid);
 		try {
 			await run("xcrun", ["devicectl", ...args, "--device", udid], {
 				timeoutMs: 60_000,
@@ -368,6 +527,7 @@ export class IosController {
 
 	/** simctl records until SIGINT; it then finalizes the file and exits 0. */
 	async startVideo(udid: string, outputPath: string): Promise<Recording> {
+		assertSimulator(udid);
 		const child = spawn(
 			"xcrun",
 			["simctl", "io", udid, "recordVideo", "--codec=h264", outputPath],
@@ -417,6 +577,7 @@ export class IosController {
 		bundleId: string,
 		sinceMinutes: number,
 	): Promise<string[]> {
+		assertSimulator(udid);
 		const folder = join(homedir(), "Library", "Logs", "DiagnosticReports");
 		const since = Date.now() - sinceMinutes * 60_000;
 		const names = await readdir(folder).catch((error: unknown) => {
@@ -444,7 +605,48 @@ export class IosController {
 		return summaries.filter((summary): summary is string => Boolean(summary));
 	}
 
+	private async physicalApps(udid: string, extra: readonly string[] = []): Promise<DevicectlApp[]> {
+		const { apps } = await this.devicectlJson<{ apps?: DevicectlApp[] }>([
+			"device",
+			"info",
+			"apps",
+			"--device",
+			udid,
+			"--include-all-apps",
+			...extra,
+		]);
+		return apps ?? [];
+	}
+
+	/** devicectl terminates by PID, so match running executables to the app bundle path. */
+	private async terminatePhysical(udid: string, bundleId: string): Promise<void> {
+		const [app] = await this.physicalApps(udid, ["--bundle-id", bundleId]);
+		if (!app?.url) throw new Error(`${bundleId} is not installed on ios:${udid}`);
+		const { runningProcesses } = await this.devicectlJson<{
+			runningProcesses?: Array<{ executable?: string; processIdentifier?: number }>;
+		}>(["device", "info", "processes", "--device", udid]);
+		for (const entry of runningProcesses ?? []) {
+			if (!entry.executable?.startsWith(app.url) || entry.processIdentifier === undefined)
+				continue;
+			await run(
+				"xcrun",
+				[
+					"devicectl",
+					"device",
+					"process",
+					"terminate",
+					"--device",
+					udid,
+					"--pid",
+					String(entry.processIdentifier),
+				],
+				{ timeoutMs: 60_000 },
+			);
+		}
+	}
+
 	async terminate(udid: string, bundleId: string): Promise<void> {
+		if (isPhysicalIosUdid(udid)) return this.terminatePhysical(udid, bundleId);
 		await this.simctl(["terminate", udid, bundleId]).catch((error: unknown) => {
 			if (!isAlreadyTerminated(error)) throw error;
 		});
@@ -455,7 +657,11 @@ export class IosController {
 	}
 
 	async uninstall(udid: string, bundleId: string): Promise<void> {
-		await this.simctl(["uninstall", udid, bundleId]);
+		if (isPhysicalIosUdid(udid))
+			await run("xcrun", ["devicectl", "device", "uninstall", "app", "--device", udid, bundleId], {
+				timeoutMs: 120_000,
+			});
+		else await this.simctl(["uninstall", udid, bundleId]);
 	}
 
 	async erase(udid: string): Promise<void> {
@@ -494,6 +700,8 @@ export class IosController {
 	}
 
 	async listApps(udid: string, includeSystem: boolean): Promise<MobileApp[]> {
+		if (isPhysicalIosUdid(udid))
+			return parsePhysicalIosApps(await this.physicalApps(udid), includeSystem);
 		const { stdout } = await this.simctl(
 			["listapps", udid],
 			30_000,

@@ -145,3 +145,22 @@ test("retries transient uiautomator dump failures, but not other failures", asyn
 	await assert.rejects(locked.controller.uiTree("emulator-5554"), /screen is off/u);
 	assert.equal(locked.dumpCalls(), 1);
 });
+
+test("runs emulator console commands only on emulators", async () => {
+	const controller = new AndroidController();
+	const calls: string[][] = [];
+	Object.assign(controller, {
+		command: async (_serial: string, args: readonly string[]) => {
+			calls.push([...args]);
+			return { stdout: "OK\n", stderr: "" };
+		},
+	});
+	await assert.rejects(
+		controller.sendSms("R58M12345AB", "5551234", "hi"),
+		/physical device; "sms" works only on Android Emulators/u,
+	);
+	await assert.rejects(controller.shutdown("192.168.1.20:5555"), /physical device/u);
+	assert.deepEqual(calls, [], "no adb command reaches a physical device");
+	await controller.sendSms("emulator-5554", "5551234", "hi");
+	assert.deepEqual(calls, [["emu", "sms", "send", "5551234", "hi"]]);
+});

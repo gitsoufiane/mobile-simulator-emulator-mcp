@@ -1,7 +1,7 @@
 {
   "name": "local-mobile-mcp-server",
   "version": "0.5.0",
-  "description": "Local MCP server for controlling iOS Simulators and Android Emulators",
+  "description": "Local MCP server for controlling iOS Simulators, Android Emulators, and physical iOS and Android devices",
   "keywords": [
     "mcp",
     "model-context-protocol",
