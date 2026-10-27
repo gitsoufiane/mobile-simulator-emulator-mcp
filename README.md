@@ -4,7 +4,7 @@
 
 <h1 align="center">Mobile Simulator & Emulator MCP</h1>
 
-<p align="center">Let your AI agent use iOS Simulators and Android Emulators to test your app.</p>
+<p align="center">Let your AI agent test your app on iOS Simulators, Android Emulators, and real phones.</p>
 
 ## What it does
 
@@ -29,62 +29,48 @@ It runs over stdio. Add `--listen` for HTTP on your own machine only.
 
 ## Requirements
 
-- macOS with Xcode and at least one installed iOS Simulator runtime.
-- Android SDK Platform Tools and Android Emulator.
+- macOS with Xcode 15 or newer.
 - Node.js 22.18+ or 24.2+.
-- A booted simulator/emulator for interaction tools. `mobile_boot_device` can boot an installed target returned by `mobile_list_devices`.
+- For Android: Android SDK Platform Tools (`adb`). Add the Android Emulator for virtual devices.
+- At least one device: an installed iOS Simulator runtime, an Android virtual device, or a connected phone.
 
-Verify the native tools:
-
-```bash
-xcrun simctl list devices
-adb devices -l
-emulator -list-avds
-```
-
-## Quick start
-
-Run it straight from GitHub. npm clones the repository, installs dependencies, and builds it on first use:
+Check the native tools:
 
 ```bash
-npx -y github:gitsoufiane/mobile-simulator-emulator-mcp
+xcrun simctl list devices     # iOS Simulators
+xcrun devicectl list devices  # iPhones and iPads
+adb devices -l                # Android emulators and phones
+emulator -list-avds           # Android virtual devices
 ```
 
-Or build from source:
+## Connect your agent
+
+The commands below run the server straight from GitHub. On first use, npm clones, installs, and builds it.
+
+### Pi
 
 ```bash
-git clone https://github.com/gitsoufiane/mobile-simulator-emulator-mcp.git
-cd mobile-simulator-emulator-mcp
-npm ci --ignore-scripts
-npm run build
+pi mcp add mobile -- npx -y github:gitsoufiane/mobile-simulator-emulator-mcp
+pi mcp list
 ```
 
-Start the devices you want the agent to use:
+### Claude Code
 
 ```bash
-# iOS: boot a Simulator from Xcode or the command line
-open -a Simulator
-
-# Android: list and start an installed AVD
-emulator -list-avds
-emulator -avd <AVD_NAME>
+claude mcp add mobile -- npx -y github:gitsoufiane/mobile-simulator-emulator-mcp
 ```
 
-Then verify both native toolchains:
+### Codex
 
 ```bash
-xcrun simctl list devices
-adb devices -l
-npm run live
+codex mcp add mobile -- npx -y github:gitsoufiane/mobile-simulator-emulator-mcp
 ```
 
-The first iOS UI interaction builds and launches WebDriverAgent through Xcode. It can take several minutes. Later calls reuse that process until the MCP server exits or another iOS Simulator is selected.
+For a physical iPhone or iPad, also pass your Apple team ID: `--env MOBILE_MCP_IOS_TEAM_ID=<TEAM_ID>` for Pi and Codex, or `-e MOBILE_MCP_IOS_TEAM_ID=<TEAM_ID>` for Claude Code. Put it before `--`.
 
-## Configure an MCP client
+### Other MCP clients
 
-Any MCP client that supports local stdio servers can run this server. Add one of the following server definitions to the client's MCP configuration.
-
-With `npx` (no clone needed):
+Clients that run local stdio servers can use this entry:
 
 ```json
 {
@@ -97,7 +83,14 @@ With `npx` (no clone needed):
 }
 ```
 
-From a local build, replacing the absolute path:
+To run a local build instead, build from source and point the client at `dist/src/index.js`:
+
+```bash
+git clone https://github.com/gitsoufiane/mobile-simulator-emulator-mcp.git
+cd mobile-simulator-emulator-mcp
+npm ci --ignore-scripts
+npm run build
+```
 
 ```json
 {
@@ -112,46 +105,84 @@ From a local build, replacing the absolute path:
 }
 ```
 
+Restart the client after you change its configuration.
+
+App, media, and certificate paths must be beneath the server's working directory. Clients that start the server in your project need no extra setting. Otherwise, set the client's `cwd` to your project, or set `MOBILE_MCP_APP_ROOT`.
+
 ### HTTP mode (`--listen`)
 
-For MCP clients that connect by URL instead of spawning a stdio process
-(for example flue's `connectMcpServer`), start the server in Streamable
-HTTP mode:
+For clients that connect by URL instead of starting a process:
 
 ```bash
 node dist/src/index.js --listen 3000
 # ready on http://127.0.0.1:3000/mcp
 ```
 
-The HTTP listener binds to `127.0.0.1` only and has no authentication — it
-is strictly a same-machine transport with the same trust model as stdio.
-As the MCP transport specification requires, it rejects with HTTP 403 any
-request whose `Host` or `Origin` header is not `127.0.0.1`, `localhost`, or
-`[::1]`, so a web page cannot reach it through DNS rebinding.
-Each MCP session gets its own protocol server, and all sessions share one
-set of device controllers, so they share one WebDriverAgent process.
-Sessions are cleaned up on disconnect. stdio remains the default when
-`--listen` is not given.
+The listener binds to `127.0.0.1` only and has no authentication, so it has the same trust model as stdio. It rejects with HTTP 403 any request whose `Host` or `Origin` is not `127.0.0.1`, `localhost`, or `[::1]`, so a web page cannot reach it through DNS rebinding. All sessions share one set of device controllers and one WebDriverAgent process.
 
-Restart the MCP client after changing its configuration. The first calls should be:
+## Add the agent skill
 
-1. `mobile_doctor` with `{}`.
-2. `mobile_list_devices` with `{}`.
-3. Use the returned `ios:...`, `android:...`, or `android-avd:...` ID in later calls.
+This repository includes the [Agent Skills](https://agentskills.io/specification) skill `skills/mobile-mcp`. It tells the agent how to call the tools in Pi, Claude Code, and Codex, how to read the server instructions, and how to treat real phones safely. It helps most in Pi, which shows only one line of MCP server instructions to the model.
 
-By default, `.app` and `.apk` installation paths are resolved beneath the MCP process working directory. Clients that launch the server from the active agent project—such as Pi's MCP adapter when no `cwd` is configured—therefore need no extra environment setting.
+### Install the skill
 
-If another MCP client starts the server from a fixed directory, set that client's `cwd` to the mobile project. `MOBILE_MCP_APP_ROOT` remains available as an optional explicit override.
+With the [skills CLI](https://github.com/vercel-labs/skills), for all three agents at once:
 
-The server writes MCP protocol messages only to stdout. Diagnostics and WebDriverAgent logs go to stderr.
+```bash
+npx skills add gitsoufiane/mobile-simulator-emulator-mcp --skill mobile-mcp -g -a pi claude-code codex
+```
 
-## Recommended agent workflow
+This puts the skill in `~/.agents/skills/mobile-mcp` (Pi and Codex) and links it from `~/.claude/skills/mobile-mcp` (Claude Code). The skills CLI sends install telemetry; set `DO_NOT_TRACK=1` to turn it off.
+
+Or copy it by hand:
+
+```bash
+git clone https://github.com/gitsoufiane/mobile-simulator-emulator-mcp.git
+mkdir -p ~/.agents/skills ~/.claude/skills
+cp -R mobile-simulator-emulator-mcp/skills/mobile-mcp ~/.agents/skills/   # Pi and Codex
+cp -R mobile-simulator-emulator-mcp/skills/mobile-mcp ~/.claude/skills/   # Claude Code
+```
+
+Restart the agent, or run `/reload` in Pi.
+
+### Use the MCP with the skill
+
+1. Connect the server with the command for your agent (see [Connect your agent](#connect-your-agent)).
+2. Install the skill.
+3. Ask for the task in plain words, for example: "Open Settings on my connected iPhone and take a screenshot." The agent loads the skill when the task matches.
+4. To force the skill, start the request with `/skill:mobile-mcp` in Pi or `/mobile-mcp` in Claude Code. In Codex, name the skill in your request ("use the mobile-mcp skill").
+
+With the skill, the agent checks that the `mobile` tools exist (and gives you the setup command if not), reads the server instructions, and asks you before it installs, uninstalls, or resets anything on a real phone.
+
+## Physical devices
+
+`mobile_list_devices` marks real devices with `physical: true`. They support app install, launch, terminate, uninstall, and app lists, plus screenshots, UI reading, taps, swipes, typing, keys, alerts, orientation, and URLs. Tools that need simulator or emulator features (boot, shutdown, erase, push, clipboard, status bar, permissions, location, media, SMS, sensors, snapshots, and similar) return a clear error.
+
+**Android**: turn on USB debugging, connect by USB or `adb pair`/`adb connect`, and accept the prompt on the phone.
+
+**iPhone or iPad** (Xcode 15 or newer):
+
+1. Turn on Developer Mode on the device, connect it, and trust this Mac.
+2. Set `MOBILE_MCP_IOS_TEAM_ID` to your Apple Developer team ID. A free Personal Team works.
+3. The first UI call builds, signs, and installs WebDriverAgent on the device. Xcode registers the bundle ID `local.mobilemcp.<TEAM_ID>.WebDriverAgentRunner` in that team.
+4. On the device, open Settings > General > VPN & Device Management and trust the developer certificate. Keep the device unlocked.
+
+Notes for physical iOS devices:
+
+- WebDriverAgent listens only on the private CoreDevice tunnel address, not on your Wi-Fi network.
+- App installs need a device-signed `.app`.
+- App logs and crash logs are not available; use Xcode or Console.
+- A free Personal Team profile expires after 7 days. The next UI call then rebuilds WebDriverAgent, and you may need to trust the certificate again.
+
+## Agent workflow
+
+The server sends this guidance to the agent as MCP instructions. The first iOS UI call builds WebDriverAgent through Xcode and can take several minutes; later calls reuse it.
 
 1. Call `mobile_doctor`.
-2. Call `mobile_list_devices` and keep the returned stable ID.
-3. Boot a shutdown target if needed.
+2. Call `mobile_list_devices` and keep the returned ID.
+3. Boot a shutdown Simulator or virtual device if needed.
 4. Install and launch the app. Use `mobile_list_apps` to look up the exact bundle ID or package name instead of guessing, and `mobile_get_foreground_app` to confirm the launch landed.
-5. Set permissions or simulated location needed by the scenario.
+5. Set the permissions or simulated location that the scenario needs (Simulators and emulators only).
 6. Call `mobile_list_elements` before using coordinates. It returns compact elements with tap-ready `center` coordinates; pass `query` to find one element. Use `mobile_take_screenshot` for visual context and `mobile_get_ui_tree` only when you need the full native hierarchy.
 7. Interact with `mobile_tap`, `mobile_swipe`, `mobile_type_text`, and `mobile_press_key`.
 8. Re-read the UI tree or screenshot after each state-changing action. Use `mobile_wait_for_element` to wait for a screen to load instead of sleeping, and `mobile_scroll_to_element` to reach rows that are not on screen yet.
@@ -162,18 +193,19 @@ The server writes MCP protocol messages only to stdout. Diagnostics and WebDrive
 Once connected, an agent can handle requests such as:
 
 - “List my available simulators and emulators, then boot the shutdown iPhone.”
+- “On my connected iPhone, open Settings and take a screenshot.”
 - “Install the Android debug APK, launch it, and take a screenshot.”
 - “Open `myapp://checkout/123`, inspect the UI tree, and tap Continue.”
 - “Set the emulator location to San Francisco and test the nearby-results screen.”
 - “Collect the last five minutes of logs for `com.example.app`.”
 - “Reset the test app, grant location permission, and rerun the onboarding flow.”
 
-Destructive tools run without an extra MCP-side confirmation. Configure this server only for trusted agents and disposable simulator/emulator data.
+Destructive tools run without an extra MCP-side confirmation. Configure this server only for trusted agents and disposable app and device data. On a physical device, they change real data on that phone.
 
 ## Tools
 
 | Tool | Purpose |
-|---|---|
+| --- | --- |
 | `mobile_doctor` | Check native tools, device counts, and WDA status |
 | `mobile_list_devices` | List iOS Simulators, Android Emulators, configured AVDs, and connected physical devices |
 | `mobile_boot_device` | Boot and wait for an iOS Simulator or Android AVD |
@@ -230,21 +262,6 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | `mobile_type_text` | Type into the focused field |
 | `mobile_press_key` | Press HOME/BACK/ENTER/app-switch/volume keys as supported; Android `NOTIFICATIONS` opens the shade |
 
-## Physical devices
-
-`mobile_list_devices` marks real devices with `physical: true`. They support app install, launch, terminate, uninstall, and app lists, plus screenshots, UI reading, taps, swipes, typing, keys, alerts, orientation, and URLs. Tools that need simulator or emulator features (boot, shutdown, erase, push, clipboard, status bar, permissions, location, media, SMS, sensors, snapshots, and similar) return a clear error.
-
-**Android**: turn on USB debugging, connect by USB or `adb pair`/`adb connect`, and accept the prompt on the phone.
-
-**iPhone or iPad** (Xcode 15 or newer):
-
-1. Turn on Developer Mode on the device, connect it, and trust this Mac.
-2. Set `MOBILE_MCP_IOS_TEAM_ID` to your Apple Developer team ID. A free Personal Team works.
-3. The first UI call builds, signs, and installs WebDriverAgent on the device. Xcode registers the bundle ID `local.mobilemcp.<TEAM_ID>.WebDriverAgentRunner` in that team.
-4. On the device, open Settings > General > VPN & Device Management and trust the developer certificate. Keep the device unlocked.
-
-WebDriverAgent listens only on the private CoreDevice tunnel address, not on your Wi-Fi network. Physical installs need a device-signed `.app`.
-
 ## Device IDs
 
 - iOS Simulator or device: `ios:<UDID>`
@@ -256,7 +273,7 @@ Always use IDs from the latest `mobile_list_devices` result.
 ## Configuration
 
 | Variable | Default | Meaning |
-|---|---|---|
+| --- | --- | --- |
 | `MOBILE_MCP_APP_ROOT` | MCP process working directory | Apps, media, and certificates are read, and recordings are written, only beneath this directory |
 | `MOBILE_MCP_URL_SCHEMES` | empty | Comma-separated extra deep-link schemes; `http` and `https` are always allowed |
 | `MOBILE_MCP_SHOW_XCODE_LOG` | `0` | Set to `1` for verbose Xcode/WDA diagnostics on stderr |
@@ -274,13 +291,13 @@ Always use IDs from the latest `mobile_list_devices` result.
 - URL schemes, device identifiers, app IDs, permissions, coordinates, environment profiles, durations, push payloads, locales, launch environment names, intent-extra keys, proxy addresses, snapshot names, and file paths are validated.
 - Recordings are written only as new `.mp4` files inside an existing directory beneath `MOBILE_MCP_APP_ROOT`; existing files are never overwritten.
 - The Android emulator console reports failures as `KO:` with exit code 0. Every console call checks for it, so a rejected command is an error, never a silent success.
-- WebDriverAgent is contacted only at `127.0.0.1:8100`.
+- WebDriverAgent is contacted only at `127.0.0.1:8100` for Simulators, or at the CoreDevice tunnel address for a physical iOS device.
 
 Treat this server like any local developer tool: it runs with the MCP client's operating-system permissions and can interact with apps displayed in test devices.
 
 ## Limits
 
-- One iOS Simulator can own the WDA process on port 8100 at a time, across all stdio or HTTP sessions of one server process. Android can run concurrently.
+- One iOS device (Simulator or physical) can own the WebDriverAgent process at a time, across all stdio or HTTP sessions of one server process. Android can run concurrently.
 - `mobile_list_elements` keeps elements that have a label, identifier, or value, or that are interactive. Layout containers and iOS keyboard keys are omitted; use `mobile_get_ui_tree` when you need them.
 - `mobile_get_ui_tree` and Android input need the screen on and unlocked. A sleeping Android Emulator makes `uiautomator dump` fail, and the server reports that as an error rather than returning an empty tree.
 - `mobile_set_accessibility` splits by platform: `contentSize`/`increaseContrast`/`reduceTransparency` are iOS-only, `fontScale` is Android-only. `reduceMotion` and `screenReader` work on both; on iOS they need Xcode 27 `devicectl`, and Android TalkBack must be installed in the emulator image.
@@ -317,7 +334,7 @@ WebDriverAgent may need several minutes to compile through Xcode. Set `MOBILE_MC
 
 ### App installation is rejected
 
-The artifact must resolve beneath the agent project's working directory, or beneath `MOBILE_MCP_APP_ROOT` when explicitly configured. Android requires an `.apk` file; iOS requires a built `.app` directory for the Simulator architecture.
+The artifact must resolve beneath the agent project's working directory, or beneath `MOBILE_MCP_APP_ROOT` when explicitly configured. Android requires an `.apk` file. iOS requires a built `.app` directory: a Simulator build for a Simulator, or a device-signed build for a physical device.
 
 ### A deep link scheme is rejected
 
@@ -325,7 +342,12 @@ The artifact must resolve beneath the agent project's working directory, or bene
 
 ### A device ID is rejected
 
-Call `mobile_list_devices` again and use its exact current ID. Physical Android and Apple devices are intentionally unsupported.
+Call `mobile_list_devices` again and use its exact current ID.
+
+### A physical iPhone or iPad fails to start WebDriverAgent
+
+- `xcodebuild failed with code 65`: set `MOBILE_MCP_SHOW_XCODE_LOG=1` and read the Xcode log. The usual causes are an untrusted developer certificate (Settings > General > VPN & Device Management) or a locked device.
+- `Not authorized for performing UI testing actions`: the device locked while WebDriverAgent was running. Unlock it, stop the agent with `mobile_terminate_app` and `appId` `local.mobilemcp.<TEAM_ID>.WebDriverAgentRunner.xctrunner`, then retry.
 
 ## Development and release checks
 
