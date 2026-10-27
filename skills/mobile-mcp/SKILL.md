@@ -36,7 +36,7 @@ codex mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simula
 2. `mobile_list_apps` for bundle IDs and package names. Add `includeSystem: true` for built-in apps such as Settings. Never guess an app ID.
 3. Read the screen with `mobile_list_elements` (`query` finds one element). Use `mobile_take_screenshot` for visual checks.
 4. Act. Prefer `mobile_tap_element` by label over `mobile_tap` by coordinates. Also `mobile_swipe`, `mobile_type_text`, and `mobile_press_key`.
-5. After each action, call `mobile_wait_for_element` for the expected result. Use `mobile_scroll_to_element` for off-screen items. Do not sleep.
+5. After each action, call `mobile_wait_for_element` for the expected result (`timeoutMs` 500 to 60000, default 10000). Use `mobile_scroll_to_element` for off-screen items. Do not sleep.
 6. On failure, collect `mobile_get_logs` or `mobile_get_crash_logs`. They are not available on physical iOS devices.
 
 Example in a Pi `codemode` script (Settings > General on iOS):
