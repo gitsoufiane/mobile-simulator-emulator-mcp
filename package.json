@@ -38,7 +38,7 @@
     "start": "node dist/src/index.js",
     "test": "node --test dist/test/*.test.js",
     "check": "npm run build && npm test",
-    "prepare": "npm run build",
+    "prepare": "if [ -d node_modules/typescript ]; then npm run build; else echo 'Skipping build: dev dependencies are not installed (Pi package install uses only skills/)'; fi",
     "prepublishOnly": "npm run check",
     "live": "node dist/test/live-smoke.js",
     "live:deep": "node dist/test/live-manipulation.js",

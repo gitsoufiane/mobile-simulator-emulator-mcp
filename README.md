@@ -137,22 +137,19 @@ This repository includes the [Agent Skills](https://agentskills.io/specification
 
 ### Install the skill
 
-With the [skills CLI](https://github.com/vercel-labs/skills), for all three agents at once:
+**Pi**: install this repository as a [Pi package](https://pi.dev/packages). Pi clones it, loads `skills/mobile-mcp`, and lists it in `pi list` and `settings.json`. `pi update` pulls new versions from GitHub.
 
 ```bash
-npx skills add gitsoufiane/mobile-simulator-emulator-mcp --skill mobile-mcp -g -a pi claude-code codex
+pi install git:github.com/gitsoufiane/mobile-simulator-emulator-mcp
 ```
 
-This puts the skill in `~/.agents/skills/mobile-mcp` (Pi and Codex) and links it from `~/.claude/skills/mobile-mcp` (Claude Code). The skills CLI sends install telemetry; set `DO_NOT_TRACK=1` to turn it off.
-
-Or copy it by hand:
+**Claude Code and Codex**: use the [skills CLI](https://github.com/vercel-labs/skills):
 
 ```bash
-git clone https://github.com/gitsoufiane/mobile-simulator-emulator-mcp.git
-mkdir -p ~/.agents/skills ~/.claude/skills
-cp -R mobile-simulator-emulator-mcp/skills/mobile-mcp ~/.agents/skills/   # Pi and Codex
-cp -R mobile-simulator-emulator-mcp/skills/mobile-mcp ~/.claude/skills/   # Claude Code
+npx skills add gitsoufiane/mobile-simulator-emulator-mcp --skill mobile-mcp -g -a claude-code codex
 ```
+
+This puts the skill in `~/.agents/skills/mobile-mcp` (Codex) and `~/.claude/skills/mobile-mcp` (Claude Code). The skills CLI sends install telemetry; set `DO_NOT_TRACK=1` to turn it off. Do not also install it for Pi this way: Pi reads `~/.agents/skills` too and warns about the duplicate name.
 
 Restart the agent, or run `/reload` in Pi.
 
