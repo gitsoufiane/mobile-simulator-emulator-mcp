@@ -17,9 +17,9 @@ The server is registered as `mobile`. This file uses the bare tool names (`mobil
 
 No `mobile` tools? Tell the user the setup command and stop:
 
-- Pi: `pi mcp add mobile -- npx -y github:gitsoufiane/mobile-simulator-emulator-mcp`
-- Claude Code: `claude mcp add mobile -- npx -y github:gitsoufiane/mobile-simulator-emulator-mcp`
-- Codex: `codex mcp add mobile -- npx -y github:gitsoufiane/mobile-simulator-emulator-mcp`
+- Pi: `pi mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp`
+- Claude Code: `claude mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp`
+- Codex: `codex mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp`
 
 Physical iPhone or iPad: the server also needs `MOBILE_MCP_IOS_TEAM_ID=<Apple team ID>` in its environment (`--env` for Pi and Codex, `-e` for Claude Code, before `--`).
 

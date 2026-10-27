@@ -45,25 +45,27 @@ emulator -list-avds           # Android virtual devices
 
 ## Connect your agent
 
-The commands below run the server straight from GitHub. On first use, npm clones, installs, and builds it.
+The commands below run the server straight from GitHub. On first use, npm clones, installs, and builds it. `--allow-git=root` is required on npm 12, which blocks git packages by default.
 
 ### Pi
 
 ```bash
-pi mcp add mobile -- npx -y github:gitsoufiane/mobile-simulator-emulator-mcp
+pi mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp
 pi mcp list
 ```
+
+The first iOS UI call can take several minutes, and Pi's default per-request timeout is 60 seconds. Add `"timeout": 300` to the `mobile` entry in `~/.pi/agent/mcp.json`.
 
 ### Claude Code
 
 ```bash
-claude mcp add mobile -- npx -y github:gitsoufiane/mobile-simulator-emulator-mcp
+claude mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp
 ```
 
 ### Codex
 
 ```bash
-codex mcp add mobile -- npx -y github:gitsoufiane/mobile-simulator-emulator-mcp
+codex mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp
 ```
 
 For a physical iPhone or iPad, also pass your Apple team ID: `--env MOBILE_MCP_IOS_TEAM_ID=<TEAM_ID>` for Pi and Codex, or `-e MOBILE_MCP_IOS_TEAM_ID=<TEAM_ID>` for Claude Code. Put it before `--`.
@@ -77,7 +79,7 @@ Clients that run local stdio servers can use this entry:
   "mcpServers": {
     "mobile": {
       "command": "npx",
-      "args": ["-y", "github:gitsoufiane/mobile-simulator-emulator-mcp"]
+      "args": ["-y", "--allow-git=root", "github:gitsoufiane/mobile-simulator-emulator-mcp"]
     }
   }
 }
