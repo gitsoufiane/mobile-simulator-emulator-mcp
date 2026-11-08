@@ -2,7 +2,72 @@ import assert from "node:assert/strict";
 import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { test } from "node:test";
+import { WebDriverAgent } from "appium-webdriveragent";
 import { WdaController } from "../src/wda.js";
+
+test("switches signing teams safely, with or without an environment default", async (t) => {
+	const original = process.env.MOBILE_MCP_IOS_TEAM_ID;
+	process.env.MOBILE_MCP_IOS_TEAM_ID = "WORK123456";
+	const launched: WebDriverAgent["args"][] = [];
+	t.mock.method(WebDriverAgent.prototype, "launch", async function (this: WebDriverAgent) {
+		launched.push(this.args);
+	});
+	const quit = t.mock.method(WebDriverAgent.prototype, "quit", async () => undefined);
+	t.mock.method(globalThis, "fetch", async () =>
+		new Response(JSON.stringify({ value: { ready: true } })),
+	);
+	let wda = new WdaController();
+	const target = async () => ({ platformVersion: "18.0", tunnelAddress: "::1" });
+	try {
+		await wda.use("phone", target, async () => undefined);
+		assert.equal(launched[0]?.xcodeOrgId, "WORK123456", "environment is the default");
+		await assert.rejects(wda.setIosTeam("personal"), /10 uppercase/u);
+		assert.equal(quit.mock.callCount(), 0, "invalid selection leaves the agent running");
+
+		let startAction: () => void = () => undefined;
+		const started = new Promise<void>((resolve) => { startAction = () => resolve(); });
+		let finishAction: () => void = () => undefined;
+		const finish = new Promise<void>((resolve) => { finishAction = () => resolve(); });
+		const action = wda.use("phone", target, async () => {
+			startAction();
+			await finish;
+		});
+		await started;
+		const selection = wda.setIosTeam("PERS123456");
+		await Promise.resolve();
+		assert.equal(quit.mock.callCount(), 0, "selection waits for the active action");
+		finishAction();
+		await Promise.all([action, selection]);
+		assert.equal(quit.mock.callCount(), 1);
+		await wda.use("phone", target, async () => undefined);
+		assert.equal(launched[1]?.xcodeOrgId, "PERS123456");
+		assert.equal(launched[1]?.updatedWDABundleId, "local.mobilemcp.PERS123456.WebDriverAgentRunner");
+		assert.equal(launched[1]?.xcodeSigningId, "Apple Development");
+		await wda.setIosTeam("PERS123456");
+		await wda.use("phone", target, async () => undefined);
+		assert.equal(launched.length, 2, "selecting the same team reuses the agent");
+		await wda.setIosTeam("WORK123456");
+		await wda.use("phone", target, async () => undefined);
+		assert.equal(launched[2]?.xcodeOrgId, "WORK123456");
+		assert.equal(process.env.MOBILE_MCP_IOS_TEAM_ID, "WORK123456");
+
+		await wda.close();
+		wda = new WdaController();
+		launched.length = 0;
+		delete process.env.MOBILE_MCP_IOS_TEAM_ID;
+		await assert.rejects(wda.ensure("phone", target), /mobile_set_ios_team/u);
+		await wda.setIosTeam("PERS123456");
+		await wda.use("phone", target, async () => undefined);
+		await wda.close();
+		await wda.use("other-phone", target, async () => undefined);
+		assert.deepEqual(launched.map((args) => args.xcodeOrgId), ["PERS123456", "PERS123456"]);
+		assert.equal(process.env.MOBILE_MCP_IOS_TEAM_ID, undefined);
+	} finally {
+		await wda.close();
+		if (original === undefined) delete process.env.MOBILE_MCP_IOS_TEAM_ID;
+		else process.env.MOBILE_MCP_IOS_TEAM_ID = original;
+	}
+});
 
 test("reuses one WDA session and recreates it once when WDA drops it", async () => {
 	let created = 0;

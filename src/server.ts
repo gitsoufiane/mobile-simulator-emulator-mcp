@@ -49,7 +49,7 @@ const VERSION = packageVersion();
 const INSTRUCTIONS = `Controls local iOS Simulators, Android Emulators, and physical iPhones, iPads, and Android phones connected to this Mac, for app testing.
 
 Call mobile_doctor first, then mobile_list_devices, and reuse the exact returned ID (ios:<UDID>, android:<serial> such as android:emulator-5554, or android-avd:<name>) in every later call. Entries with physical: true are real devices.
-Physical devices support apps, screenshots, UI reading, taps, swipes, typing, and keys. Tools that need simulator or emulator features (boot, shutdown, erase, push, clipboard, status bar, permissions, location, media, SMS, sensors, snapshots, and similar) report that in their error. A physical iOS device needs Developer Mode, a trusted pairing, and MOBILE_MCP_IOS_TEAM_ID so Xcode can sign WebDriverAgent; if WebDriverAgent fails to start, the device must be unlocked and trust the developer certificate in Settings > General > VPN & Device Management.
+Physical devices support apps, screenshots, UI reading, taps, swipes, typing, and keys. Tools that need simulator or emulator features (boot, shutdown, erase, push, clipboard, status bar, permissions, location, media, SMS, sensors, snapshots, and similar) report that in their error. A physical iOS device needs Developer Mode, a trusted pairing, and a signing team. Call mobile_set_ios_team with the user's work or Personal Team ID, or use MOBILE_MCP_IOS_TEAM_ID as the default. Never guess a team ID. The selection lasts until the server restarts and applies to all physical iOS devices; changing teams stops WebDriverAgent, and the next UI call builds and installs it under the selected team. Ask before that install on a physical device; if WebDriverAgent fails to start, the device must be unlocked and trust the developer certificate in Settings > General > VPN & Device Management.
 
 Discover app identifiers with mobile_list_apps instead of guessing bundle IDs or package names.
 Read the screen before acting: mobile_list_elements returns compact elements with tap-ready center coordinates (pass query to find one element); use mobile_take_screenshot for visual context and mobile_get_ui_tree only when the full native hierarchy is needed. Then use mobile_tap, mobile_long_press, mobile_swipe, or mobile_type_text, and re-read after every state-changing action.
@@ -590,6 +590,30 @@ export function createMobileServer(options: ServerOptions = {}): {
 				],
 				...(Object.keys(errors).length ? { errors } : {}),
 			});
+		}),
+	);
+
+	server.registerTool(
+		"mobile_set_ios_team",
+		{
+			title: "Select iOS Signing Team",
+			description:
+				"Select a work or Personal Team for physical iOS devices using its Apple Developer team ID. Overrides MOBILE_MCP_IOS_TEAM_ID until the server restarts, for all physical iOS devices. Changing teams stops WebDriverAgent; the next UI call builds, signs, and installs it with this team. Does not change Xcode accounts or server configuration. Never guess the user's team ID.",
+			inputSchema: z.object({
+				teamId: z.string().regex(/^[A-Z0-9]{10}$/u)
+					.describe("10-character Apple Developer team ID from Xcode; work and Personal Teams use the same format"),
+			}).strict(),
+			outputSchema: z.object({ teamId: z.string() }),
+			annotations: {
+				readOnlyHint: false,
+				destructiveHint: false,
+				idempotentHint: true,
+				openWorldHint: false,
+			},
+		},
+		safe(async ({ teamId }) => {
+			await wda.setIosTeam(teamId);
+			return jsonResult({ teamId });
 		}),
 	);
 

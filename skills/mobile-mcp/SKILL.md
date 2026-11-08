@@ -27,7 +27,7 @@ claude mcp add --scope user mobile -- npx -y --allow-git=root github:gitsoufiane
 codex mcp add mobile -- npx -y --allow-git=root github:gitsoufiane/mobile-simulator-emulator-mcp
 ```
 
-- Physical iPhone or iPad: add `--env MOBILE_MCP_IOS_TEAM_ID=<Apple team ID>` after `mobile` and before `--`.
+- Physical iPhone or iPad: call `mobile_set_ios_team({ teamId: "<Apple team ID>" })` with the user's work or Personal Team ID. Never guess it. Selection applies to all physical iOS devices until server restart. To set a startup default, add `--env MOBILE_MCP_IOS_TEAM_ID=<Apple team ID>` after `mobile` and before `--`.
 - The first iOS UI call builds WebDriverAgent for several minutes. Pi and Codex stop a tool call after 60 seconds by default. Set `"timeout": 300` in the Pi `mcp.json` entry. In `~/.codex/config.toml`, add `tool_timeout_sec = 300` and `startup_timeout_sec = 120` directly under the existing `[mcp_servers.mobile]` table; the first start also clones and builds the server.
 
 ## Work loop
@@ -61,6 +61,7 @@ Entries with `physical: true` are physical devices with real user data.
 
 - You MUST ask the user before any tool that installs, uninstalls, resets, erases, or changes permissions or settings on a physical device.
 - Simulator-only and emulator-only tools return an error on a physical device. Do not retry them; report the limit.
+- Use `mobile_set_ios_team` to switch between the user's work and Personal Team IDs. Changing teams stops WebDriverAgent; ask before the next UI call builds and installs it under that team.
 - Wait for the first iOS UI call while it builds and installs WebDriverAgent. Do not start a second call.
 - `xcodebuild failed with code 65`: ask the user to unlock the device and trust the developer certificate in Settings > General > VPN & Device Management. Then retry once.
 - `Not authorized for performing UI testing actions`: ask the user to unlock the device. Find the app ID that ends in `.WebDriverAgentRunner.xctrunner` with `mobile_list_apps`, stop it with `mobile_terminate_app`, then retry.

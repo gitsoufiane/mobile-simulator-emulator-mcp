@@ -10,7 +10,7 @@
 
 Your coding agent can open, tap, type, scroll, and check apps on a local device, through [MCP (Model Context Protocol)](https://modelcontextprotocol.io/).
 
-- **55 tools** for apps, screen actions, screenshots, logs, location, permissions, and device settings.
+- **56 tools** for apps, screen actions, screenshots, logs, location, permissions, and device settings.
 - **Finds buttons by their text**, so the agent does not guess screen positions.
 - **Waits and scrolls for you** with `mobile_wait_for_element` and `mobile_scroll_to_element`.
 - **Real phones too**: iPhones, iPads, and Android phones connected to your Mac (see [Physical devices](#physical-devices)).
@@ -77,7 +77,7 @@ tool_timeout_sec = 300
 startup_timeout_sec = 120
 ```
 
-For a physical iPhone or iPad, also pass your Apple team ID with `--env MOBILE_MCP_IOS_TEAM_ID=<TEAM_ID>`. Put it after the server name `mobile` and before `--`; all three CLIs accept this order.
+For a physical iPhone or iPad, select your work or Personal Team with `mobile_set_ios_team({ teamId: "<TEAM_ID>" })` after connecting. To set a default at server startup instead, pass `--env MOBILE_MCP_IOS_TEAM_ID=<TEAM_ID>` after the server name `mobile` and before `--`; all three CLIs accept this order.
 
 ### Other MCP clients
 
@@ -171,9 +171,11 @@ With the skill, the agent checks that the `mobile` tools exist (and gives you th
 **iPhone or iPad** (Xcode 15 or newer):
 
 1. Turn on Developer Mode on the device, connect it, and trust this Mac.
-2. Set `MOBILE_MCP_IOS_TEAM_ID` to your Apple Developer team ID. A free Personal Team works.
+2. Call `mobile_set_ios_team` with `{ "teamId": "<TEAM_ID>" }`, using your work or Personal Team's 10-character Apple Developer team ID from Xcode. A free Personal Team works. Alternatively, set `MOBILE_MCP_IOS_TEAM_ID` as the server's default.
 3. The first UI call builds, signs, and installs WebDriverAgent on the device. Xcode registers the bundle ID `local.mobilemcp.<TEAM_ID>.WebDriverAgentRunner` in that team.
 4. On the device, open Settings > General > VPN & Device Management and trust the developer certificate. Keep the device unlocked.
+
+To switch teams, call `mobile_set_ios_team` again with the other team's ID. The selection applies to all physical iOS devices on this server until it restarts; it does not change your Xcode accounts or saved server configuration. After a restart, `MOBILE_MCP_IOS_TEAM_ID` is the default again. Changing teams waits for the current UI action to finish, then stops WebDriverAgent. The next UI call builds, signs, and installs it under the selected team. Selecting a team does not check certificates or provisioning; Xcode checks those during the build. Sign in to the matching Apple account in Xcode first.
 
 Notes for physical iOS devices:
 
@@ -216,6 +218,7 @@ Destructive tools run without an extra MCP-side confirmation. Configure this ser
 | --- | --- |
 | `mobile_doctor` | Check native tools, device counts, and WDA status |
 | `mobile_list_devices` | List iOS Simulators, Android Emulators, configured AVDs, and connected physical devices |
+| `mobile_set_ios_team` | Select a work or Personal Team by Team ID for physical iOS signing until the server restarts |
 | `mobile_boot_device` | Boot and wait for an iOS Simulator or Android AVD |
 | `mobile_shutdown_device` | Shut down a running target without deleting data |
 | `mobile_install_app` | Install `.app` or `.apk` artifacts from the active project root |
@@ -285,7 +288,7 @@ Always use IDs from the latest `mobile_list_devices` result.
 | `MOBILE_MCP_APP_ROOT` | MCP process working directory | Apps, media, and certificates are read, and recordings are written, only beneath this directory |
 | `MOBILE_MCP_URL_SCHEMES` | empty | Comma-separated extra deep-link schemes; `http` and `https` are always allowed |
 | `MOBILE_MCP_SHOW_XCODE_LOG` | `0` | Set to `1` for verbose Xcode/WDA diagnostics on stderr |
-| `MOBILE_MCP_IOS_TEAM_ID` | none | Apple Developer team ID that signs WebDriverAgent for physical iOS devices |
+| `MOBILE_MCP_IOS_TEAM_ID` | none | Default Apple Developer team ID for physical iOS signing; `mobile_set_ios_team` overrides it until restart |
 | `ANDROID_SDK_ROOT` / `ANDROID_HOME` | executable lookup | Android SDK location |
 
 ## Security model
@@ -369,7 +372,7 @@ npm run live:destructive
 npm audit --omit=dev
 ```
 
-Every tool must pass a live test before you push. Boot one iOS Simulator and one Android Emulator, then run all the commands above. Together the `live*` gates call all 55 tools.
+Every tool must pass a live test before you push. Boot one iOS Simulator and one Android Emulator, then run all the commands above. Together the `live*` gates cover the 55 device tools. Also test `mobile_set_ios_team` with your work and Personal Team IDs on a physical iOS device, then run a UI call after each selection to verify signing.
 
 `npm run live:extended` exercises every 0.5.0 tool on both platforms against Settings and Safari and restores each change: locale, launch arguments/extras, element taps, keyboard, orientation (including a landscape tap beyond the portrait width), double tap, lock, recording, crash logs, snapshots, calls and console `KO:` errors, sensors, proxy, reduce motion, TalkBack/VoiceOver, the notification shade, Face ID, alerts, and the accessibility audit.
 

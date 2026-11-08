@@ -69,6 +69,7 @@ export class WdaController {
 	private udid: string | undefined;
 	private sessionPath: string | undefined;
 	private operationQueue: Promise<void> = Promise.resolve();
+	private teamId: string | undefined;
 	private baseUrl: string;
 
 	/** `defaultUrl` exists for tests; a Simulator agent always binds port 8100. */
@@ -143,6 +144,21 @@ export class WdaController {
 		return this.udid === udid;
 	}
 
+	async setIosTeam(teamId: string): Promise<void> {
+		if (!/^[A-Z0-9]{10}$/u.test(teamId))
+			throw new Error("Apple Developer team ID must contain 10 uppercase letters or digits");
+		const result = this.operationQueue.then(async () => {
+			if (teamId !== (this.teamId ?? process.env.MOBILE_MCP_IOS_TEAM_ID))
+				await this.stopAgent();
+			this.teamId = teamId;
+		});
+		this.operationQueue = result.then(
+			() => undefined,
+			() => undefined,
+		);
+		await result;
+	}
+
 	/**
 	 * Starts WDA for `udid` unless it is already serving that device. The
 	 * target is resolved lazily because it costs a device-list call that a
@@ -155,10 +171,10 @@ export class WdaController {
 		if (this.agent && this.udid === udid && (await this.isReady())) return;
 		await this.stopAgent();
 		const { platformVersion, tunnelAddress } = await resolveTarget();
-		const teamId = process.env.MOBILE_MCP_IOS_TEAM_ID ?? "";
+		const teamId = this.teamId ?? process.env.MOBILE_MCP_IOS_TEAM_ID ?? "";
 		if (tunnelAddress && !/^[A-Z0-9]{10}$/u.test(teamId))
 			throw new Error(
-				"Physical iOS devices need MOBILE_MCP_IOS_TEAM_ID: the 10-character Apple Developer team ID that Xcode uses to sign WebDriverAgent",
+				"Physical iOS devices need a signing team: call mobile_set_ios_team with your work or Personal Team's 10-character Apple Developer team ID, or set MOBILE_MCP_IOS_TEAM_ID",
 			);
 		const common = {
 			device: { udid },

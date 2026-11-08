@@ -26,10 +26,11 @@ after(async () => {
 test("lists the focused mobile tool surface", async () => {
 	const result = await client.listTools();
 	const names = result.tools.map((tool) => tool.name);
-	assert.equal(names.length, 55);
+	assert.equal(names.length, 56);
 	assert.deepEqual(names, [
 		"mobile_doctor",
 		"mobile_list_devices",
+		"mobile_set_ios_team",
 		"mobile_boot_device",
 		"mobile_shutdown_device",
 		"mobile_install_app",
@@ -123,6 +124,24 @@ test("returns structured data for a valid call", async () => {
 	});
 	assert.equal(result.isError, undefined);
 	assert.deepEqual(result.structuredContent, { ok: true, source: "test" });
+});
+
+test("selects either signing team for this session and rejects invalid IDs", async () => {
+	for (const teamId of ["WORK123456", "PERS123456"]) {
+		const result = await client.callTool({
+			name: "mobile_set_ios_team",
+			arguments: { teamId },
+		});
+		assert.equal(result.isError, undefined);
+		assert.deepEqual(result.structuredContent, { teamId });
+	}
+	for (const teamId of ["", "personal", "work123456", "TOOLONG12345", "../1234567"]) {
+		const result = await client.callTool({
+			name: "mobile_set_ios_team",
+			arguments: { teamId },
+		});
+		assert.equal(result.isError, true, teamId);
+	}
 });
 
 test("rejects invalid environment controls before native execution", async () => {
