@@ -1,0 +1,14 @@
+{
+  "$schema": "https://agent-plugins.org/schemas/1.0.0/plugin.schema.json",
+  "name": "mobile-mcp",
+  "version": "0.6.0",
+  "description": "Test apps on iOS Simulators, Android Emulators, and real iPhones and Android phones: the mobile MCP server plus the mobile-mcp skill that teaches the agent to use it.",
+  "author": {
+    "name": "gitsoufiane",
+    "url": "https://github.com/gitsoufiane"
+  },
+  "homepage": "https://github.com/gitsoufiane/mobile-simulator-emulator-mcp#readme",
+  "repository": "https://github.com/gitsoufiane/mobile-simulator-emulator-mcp",
+  "license": "MIT",
+  "keywords": ["mobile", "ios-simulator", "android-emulator", "mcp", "testing"]
+}

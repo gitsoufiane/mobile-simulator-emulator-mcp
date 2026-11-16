@@ -1,0 +1,15 @@
+{
+  "name": "gitsoufiane-mobile",
+  "description": "The mobile MCP server and its agent skill",
+  "owner": {
+    "name": "gitsoufiane",
+    "url": "https://github.com/gitsoufiane"
+  },
+  "plugins": [
+    {
+      "name": "mobile-mcp",
+      "source": "./",
+      "description": "Test apps on iOS Simulators, Android Emulators, and real phones"
+    }
+  ]
+}

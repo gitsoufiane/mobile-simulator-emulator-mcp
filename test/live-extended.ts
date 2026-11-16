@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { mkdir, rm, stat } from "node:fs/promises";
 import { resolve } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { type CallToolResult, Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 // Live gate for the 0.5.0 tools. Every state change is reverted: locale,
 // orientation, lock, accessibility, proxy, snapshot, and call state. It
@@ -41,8 +40,9 @@ async function call(
 	})) as CallToolResult;
 	if (result.isError)
 		throw new Error(`${name} ${JSON.stringify(args)}: ${JSON.stringify(result.content)}`);
-	assert.ok(result.structuredContent);
-	return result.structuredContent;
+	const data = result.structuredContent;
+	assert.ok(typeof data === "object" && data !== null, `${name} returned no object`);
+	return data as Record<string, unknown>;
 }
 
 async function rejects(
@@ -55,22 +55,9 @@ async function rejects(
 	assert.match(JSON.stringify(result.content), pattern);
 }
 
-async function labels(device: string, query?: string): Promise<string[]> {
-	const listed = await call("mobile_list_elements", {
-		device,
-		...(query ? { query } : {}),
-	});
-	return (listed.elements as Array<{ label?: string }>).flatMap((entry) =>
-		entry.label ? [entry.label] : [],
-	);
-}
-
+/** wait_for_element retries the read errors of an app that is still relaunching. */
 async function waitForLabel(device: string, query: string): Promise<void> {
-	for (let attempt = 0; attempt < 20; attempt += 1) {
-		if ((await labels(device, query)).length) return;
-		await pause(500);
-	}
-	throw new Error(`No element matching "${query}" appeared on ${device}`);
+	await call("mobile_wait_for_element", { device, query, timeoutMs: 10_000 });
 }
 
 /** Scrolls down to a lower row and back up, so later steps see the top. */

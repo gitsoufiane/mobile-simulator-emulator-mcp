@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { type CallToolResult, Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 interface ListedDevice {
 	id: string;
@@ -12,10 +11,9 @@ interface ListedDevice {
 
 function structured(result: CallToolResult): Record<string, unknown> {
 	if (result.isError) throw new Error(JSON.stringify(result.content));
-	assert.ok(
-		result.structuredContent && typeof result.structuredContent === "object",
-	);
-	return result.structuredContent;
+	const data = result.structuredContent;
+	assert.ok(typeof data === "object" && data !== null);
+	return data as Record<string, unknown>;
 }
 
 function screenshotBytes(result: CallToolResult): number {
@@ -23,7 +21,8 @@ function screenshotBytes(result: CallToolResult): number {
 	const image = result.content.find((item) => item.type === "image");
 	assert.ok(image && image.type === "image");
 	const data = Buffer.from(image.data, "base64");
-	assert.equal(data.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+	const signature = image.mimeType === "image/png" ? "89504e470d0a1a0a" : "ffd8ff";
+	assert.equal(data.subarray(0, signature.length / 2).toString("hex"), signature);
 	return data.length;
 }
 
@@ -108,6 +107,17 @@ try {
 		}),
 	]);
 
+	const iosFullResolution = (await client.callTool({
+		name: "mobile_take_screenshot",
+		arguments: { device: ios.id, fullResolution: true },
+	})) as CallToolResult;
+	const iosJpegBytes = screenshotBytes(iosScreenshot as CallToolResult);
+	const iosPngBytes = screenshotBytes(iosFullResolution);
+	assert.ok(
+		iosJpegBytes * 5 < iosPngBytes,
+		`the default iOS screenshot (${iosJpegBytes} bytes) is far smaller than the PNG (${iosPngBytes} bytes)`,
+	);
+
 	process.stdout.write(
 		`${JSON.stringify({
 			android: android.id,
@@ -115,7 +125,8 @@ try {
 			androidScreenshotBytes: screenshotBytes(
 				androidScreenshot as CallToolResult,
 			),
-			iosScreenshotBytes: screenshotBytes(iosScreenshot as CallToolResult),
+			iosScreenshotBytes: iosJpegBytes,
+			iosFullResolutionBytes: iosPngBytes,
 			androidUiCharacters: (androidUi.tree as string).length,
 			iosUiCharacters: (iosUi.tree as string).length,
 			interaction: "HOME",

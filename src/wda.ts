@@ -1,8 +1,27 @@
 import { randomUUID } from "node:crypto";
+import { createServer } from "node:net";
+import type { AddressInfo } from "node:net";
 import { WebDriverAgent } from "appium-webdriveragent";
 
-const WDA_URL = "http://127.0.0.1:8100";
+const WDA_DEVICE_PORT = 8100;
+const WDA_URL = `http://127.0.0.1:${WDA_DEVICE_PORT}`;
 const HTTP_TIMEOUT_MS = 30_000;
+
+/**
+ * A Simulator agent listens on the Mac itself. A fixed port would let a
+ * second server process (another MCP client) find the first one's agent and
+ * send its taps to the wrong Simulator, so each launch takes a free port.
+ */
+async function freeLoopbackPort(): Promise<number> {
+	const server = createServer();
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	const { port } = server.address() as AddressInfo;
+	await new Promise<void>((resolve) => server.close(() => resolve()));
+	return port;
+}
 
 type WdaLogger = NonNullable<ConstructorParameters<typeof WebDriverAgent>[1]>;
 
@@ -72,7 +91,7 @@ export class WdaController {
 	private teamId: string | undefined;
 	private baseUrl: string;
 
-	/** `defaultUrl` exists for tests; a Simulator agent always binds port 8100. */
+	/** `defaultUrl` exists for tests; ensure() points baseUrl at the launched agent. */
 	constructor(private readonly defaultUrl = WDA_URL) {
 		this.baseUrl = defaultUrl;
 	}
@@ -135,7 +154,8 @@ export class WdaController {
 
 	async status(): Promise<{ running: boolean; device?: string }> {
 		return {
-			running: await this.isReady(),
+			// Without an agent of its own, a ready answer would come from another process.
+			running: this.agent !== undefined && (await this.isReady()),
 			...(this.udid ? { device: `ios:${this.udid}` } : {}),
 		};
 	}
@@ -176,12 +196,15 @@ export class WdaController {
 			throw new Error(
 				"Physical iOS devices need a signing team: call mobile_set_ios_team with your work or Personal Team's 10-character Apple Developer team ID, or set MOBILE_MCP_IOS_TEAM_ID",
 			);
+		// A physical agent listens on its own device's tunnel address, so the
+		// fixed port cannot collide there.
+		const port = tunnelAddress ? WDA_DEVICE_PORT : await freeLoopbackPort();
 		const common = {
 			device: { udid },
 			platformVersion,
 			iosSdkVersion: platformVersion,
-			wdaLocalPort: 8100,
-			wdaRemotePort: 8100,
+			wdaLocalPort: port,
+			wdaRemotePort: port,
 			showXcodeLog: process.env.MOBILE_MCP_SHOW_XCODE_LOG === "1",
 		};
 		this.agent = new WebDriverAgent(
@@ -203,15 +226,17 @@ export class WdaController {
 						host: "127.0.0.1",
 						wdaBindingIP: "127.0.0.1",
 						realDevice: false,
+						// The agent's MJPEG stream also listens on the Mac; this server never reads it.
+						mjpegServerPort: await freeLoopbackPort(),
 						wdaLaunchTimeout: 180_000,
 					},
 			stderrLogger,
 		);
 		if (tunnelAddress) {
 			// The package joins wdaBindingIP and port without IPv6 brackets.
-			this.baseUrl = `http://[${tunnelAddress}]:8100`;
+			this.baseUrl = `http://[${tunnelAddress}]:${port}`;
 			this.agent.url = this.baseUrl;
-		}
+		} else this.baseUrl = `http://127.0.0.1:${port}`;
 		this.udid = udid;
 		try {
 			await this.agent.launch(randomUUID());

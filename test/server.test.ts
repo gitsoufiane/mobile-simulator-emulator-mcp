@@ -1,10 +1,15 @@
 import assert from "node:assert/strict";
 import { after, before, test } from "node:test";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
-import { createMobileServer } from "../src/server.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
+import {
+	closeControllers,
+	createControllers,
+	createMobileServer,
+} from "../src/server.js";
 
-const created = createMobileServer({
+const controllers = createControllers();
+const server = createMobileServer({
+	controllers,
 	doctor: async () => ({ ok: true, source: "test" }),
 });
 const client = new Client({ name: "mobile-mcp-test", version: "1.0.0" });
@@ -14,13 +19,13 @@ before(async () => {
 		InMemoryTransport.createLinkedPair();
 	await Promise.all([
 		client.connect(clientTransport),
-		created.server.connect(serverTransport),
+		server.connect(serverTransport),
 	]);
 });
 
 after(async () => {
 	await client.close();
-	await created.close();
+	await closeControllers(controllers);
 });
 
 test("lists the focused mobile tool surface", async () => {

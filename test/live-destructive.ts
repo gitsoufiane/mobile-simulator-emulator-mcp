@@ -3,9 +3,8 @@ import { execFileSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { type CallToolResult, Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 // Live gate for the tools that install, delete, or erase. It never touches
 // the user's devices: it creates a throwaway iOS Simulator and Android AVD,
@@ -83,7 +82,9 @@ async function call(name: string, args: Record<string, unknown>): Promise<Record
 	const result = (await client.callTool({ name, arguments: args })) as CallToolResult;
 	if (result.isError)
 		throw new Error(`${name} ${JSON.stringify(args)}: ${JSON.stringify(result.content)}`);
-	return result.structuredContent ?? {};
+	const data = result.structuredContent ?? {};
+	assert.ok(typeof data === "object" && data !== null, `${name} returned no object`);
+	return data as Record<string, unknown>;
 }
 
 async function hasFixture(device: string): Promise<boolean> {

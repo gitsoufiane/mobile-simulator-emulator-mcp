@@ -114,30 +114,18 @@ export function parseAndroidForegroundApp(stdout: string): {
 }
 
 /**
- * `uiautomator dump` and `adb exec-out cat` both exit 0 on failure, so their
- * output is the only signal that a dump actually happened. Without these
- * checks a "No such file" message is returned as if it were the UI tree.
+ * `uiautomator dump /dev/tty` exits 0 on failure and `exec-out` merges its
+ * error text into stdout, so the output is the only signal that a dump
+ * happened. It ends with a "UI hierchary dumped to" line after the XML.
  */
-export function validateAndroidUiTree(
-	dump: string,
-	tree: string,
-	remotePath: string,
-): string {
-	validateAndroidUiDump(dump, remotePath);
-	if (!tree.includes("<hierarchy")) {
+export function parseAndroidUiDump(output: string): string {
+	// A window without nodes serializes as a self-closing <hierarchy ... />.
+	const tree = /<hierarchy\b(?:[^>]*\/>|[\s\S]*<\/hierarchy>)/u.exec(output)?.[0];
+	if (!tree)
 		throw new Error(
-			`Android returned no UI hierarchy: ${tree.trim().slice(0, 200) || "empty output"}`,
+			`uiautomator could not dump the UI (is the screen on and unlocked?): ${output.trim().slice(0, 200) || "no output"}`,
 		);
-	}
 	return tree;
-}
-
-export function validateAndroidUiDump(dump: string, remotePath: string): void {
-	if (!dump.includes(remotePath)) {
-		throw new Error(
-			`uiautomator could not dump the UI (is the screen on and unlocked?): ${dump.trim() || "no output"}`,
-		);
-	}
 }
 
 /**
@@ -191,6 +179,12 @@ export class AndroidController {
 		if (!isEmulatorSerial(serial))
 			throw new Error(
 				`android:${serial} is a physical device; "${args[0] ?? "emu"}" works only on Android Emulators`,
+			);
+		// The console reads one command per line, so a line break in any value
+		// (an SMS text, for example) would run a second command such as kill.
+		if (args.some((arg) => /[\0\r\n]/u.test(arg)))
+			throw new Error(
+				"Emulator console values cannot contain line breaks or control characters",
 			);
 		const result = await this.command(serial, ["emu", ...args], timeoutMs);
 		const failure = /^KO:\s*(.*)$/mu.exec(result.stdout)?.[1];
@@ -772,34 +766,18 @@ export class AndroidController {
 		}
 	}
 
+	/**
+	 * /dev/tty sends the XML to stdout: one adb round trip instead of dump,
+	 * cat, and rm, and no shared file on the device for concurrent reads.
+	 */
 	private async dumpUiTree(serial: string): Promise<string> {
-		const remotePath = "/sdcard/mobile-mcp-ui.xml";
-		try {
-			// uiautomator reports failures such as "could not get idle state" on
-			// stderr while still exiting 0, so both streams feed validation.
-			const { stdout, stderr } = await this.command(
-				serial,
-				["shell", "uiautomator", "dump", "--compressed", remotePath],
-				15_000,
-			);
-			const dump = `${stdout}\n${stderr}`;
-			// Without a dump file, `cat` fails and hides the dump error.
-			validateAndroidUiDump(dump, remotePath);
-			const { stdout: tree } = await this.command(
-				serial,
-				["exec-out", "cat", remotePath],
-				10_000,
-				8 * 1024 * 1024,
-			);
-			return validateAndroidUiTree(dump, tree, remotePath);
-		} finally {
-			// safe to ignore: remote temp cleanup must not hide the UI-tree result.
-			await this.command(
-				serial,
-				["shell", "rm", "-f", remotePath],
-				5_000,
-			).catch(() => undefined);
-		}
+		const { stdout } = await this.command(
+			serial,
+			["exec-out", "uiautomator", "dump", "--compressed", "/dev/tty"],
+			15_000,
+			8 * 1024 * 1024,
+		);
+		return parseAndroidUiDump(stdout);
 	}
 
 	private async screenSize(

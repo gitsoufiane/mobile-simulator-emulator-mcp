@@ -1,6 +1,6 @@
 {
   "name": "local-mobile-mcp-server",
-  "version": "0.5.0",
+  "version": "0.6.0",
   "description": "Local MCP server for controlling iOS Simulators, Android Emulators, and physical iOS and Android devices",
   "keywords": [
     "mcp",
@@ -24,6 +24,7 @@
   },
   "files": [
     "dist/src",
+    "skills",
     "README.md",
     "LICENSE"
   ],
@@ -47,17 +48,20 @@
     "live:destructive": "node dist/test/live-destructive.js"
   },
   "dependencies": {
-    "@modelcontextprotocol/sdk": "1.32.1",
-    "appium-webdriveragent": "16.16.3",
+    "@modelcontextprotocol/server": "2.4.0",
+    "appium-webdriveragent": "16.18.5",
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "@modelcontextprotocol/client": "2.4.0",
     "@types/node": "24.19.2",
     "@typescript/native": "npm:typescript@7.0.2",
     "typescript": "npm:@typescript/typescript6@6.0.2"
   },
   "overrides": {
-    "shell-quote": "1.12.0"
+    "shell-quote": "1.12.0",
+    "glob": "14.0.6",
+    "minimatch": "11.0.8"
   },
   "license": "MIT"
 }

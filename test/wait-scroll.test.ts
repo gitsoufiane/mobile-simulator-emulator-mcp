@@ -1,10 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import type { AndroidController } from "../src/android.js";
 import type { IosController } from "../src/ios.js";
-import { createMobileServer } from "../src/server.js";
+import { closeControllers, createMobileServer } from "../src/server.js";
 import type { WdaController } from "../src/wda.js";
 
 const device = "android:emulator-5554";
@@ -39,19 +38,20 @@ async function connect(screens: Array<string | Error>) {
 			swipes.push(line);
 		},
 	};
-	const created = createMobileServer({
-		controllers: {
-			android: android as unknown as AndroidController,
-			ios: {} as IosController,
-			wda: {} as WdaController,
-		},
-	});
+	const controllers = {
+		android: android as unknown as AndroidController,
+		ios: {} as IosController,
+		wda: { close: async () => undefined } as WdaController,
+		recordings: new Map(),
+		simulatedLocations: new Set<string>(),
+	};
+	const server = createMobileServer({ controllers });
 	const client = new Client({ name: "wait-scroll-test", version: "1.0.0" });
 	const [clientTransport, serverTransport] =
 		InMemoryTransport.createLinkedPair();
 	await Promise.all([
 		client.connect(clientTransport),
-		created.server.connect(serverTransport),
+		server.connect(serverTransport),
 	]);
 	return {
 		call: (name: string, args: Record<string, unknown>) =>
@@ -60,7 +60,7 @@ async function connect(screens: Array<string | Error>) {
 		reads: () => reads,
 		close: async () => {
 			await client.close();
-			await created.close();
+			await closeControllers(controllers);
 		},
 	};
 }

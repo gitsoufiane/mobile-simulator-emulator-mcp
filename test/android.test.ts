@@ -7,7 +7,7 @@ import {
 	parseAndroidForegroundApp,
 	parseAndroidPackages,
 	parseAndroidSnapshots,
-	validateAndroidUiTree,
+	parseAndroidUiDump,
 } from "../src/android.js";
 
 test("reads package names from pm list packages output", () => {
@@ -44,42 +44,26 @@ test("falls back to mFocusedApp when the focused window is null", () => {
 });
 
 test("never returns a failed UI dump as if it were the tree", () => {
-	const remotePath = "/sdcard/mobile-mcp-ui.xml";
-	const realTree = `<?xml version='1.0' encoding='UTF-8' standalone='yes' ?><hierarchy rotation="0"><node index="0"/></hierarchy>`;
-
+	const tree = `<hierarchy rotation="0"><node index="0"/></hierarchy>`;
+	// Real `adb exec-out uiautomator dump --compressed /dev/tty` output.
 	assert.equal(
-		validateAndroidUiTree(
-			`UI hierchary dumped to: ${remotePath}`,
-			realTree,
-			remotePath,
+		parseAndroidUiDump(
+			`<?xml version='1.0' encoding='UTF-8' standalone='yes' ?>${tree}UI hierchary dumped to: /dev/tty\n`,
 		),
-		realTree,
+		tree,
 	);
-
-	// Both native commands exit 0 on failure, so these outputs are the only
-	// signal. A sleeping or locked device produces exactly these strings.
-	assert.throws(
-		() =>
-			validateAndroidUiTree(
-				"ERROR: null root node returned by UiTestAutomationBridge.",
-				`cat: ${remotePath}: No such file or directory`,
-				remotePath,
-			),
-		/could not dump the UI/u,
+	assert.equal(
+		parseAndroidUiDump(`<?xml version='1.0' ?><hierarchy rotation="1" />UI hierchary dumped to: /dev/tty`),
+		`<hierarchy rotation="1" />`,
 	);
-	assert.throws(
-		() => validateAndroidUiTree("", "", remotePath),
-		/could not dump the UI/u,
-	);
-	assert.throws(
-		() =>
-			validateAndroidUiTree(
-				`UI hierchary dumped to: ${remotePath}`,
-				`cat: ${remotePath}: No such file or directory`,
-				remotePath,
-			),
-		/no UI hierarchy/u,
-	);
+	// The dump exits 0 on failure, so these outputs are the only signal. A
+	// sleeping or locked device produces exactly the first string.
+	for (const failure of [
+		"ERROR: null root node returned by UiTestAutomationBridge.\n",
+		"",
+		`<hierarchy rotation="0"><node index="0">`,
+	])
+		assert.throws(() => parseAndroidUiDump(failure), /could not dump the UI/u);
 });
 
 test("maps every supported key to an Android keycode", () => {
@@ -112,30 +96,31 @@ test("lists emulator snapshot tags", () => {
 });
 
 test("retries transient uiautomator dump failures, but not other failures", async () => {
-	const remotePath = "/sdcard/mobile-mcp-ui.xml";
 	const fake = (dumps: string[]) => {
 		const controller = new AndroidController();
 		let dumpCalls = 0;
+		const calls: string[][] = [];
 		Object.assign(controller, {
 			command: async (_serial: string, args: readonly string[]) => {
-				if (args.includes("dump")) {
-					const stderr = dumps[Math.min(dumpCalls, dumps.length - 1)] ?? "";
-					dumpCalls += 1;
-					return { stdout: "", stderr };
-				}
-				if (args.includes("cat"))
-					return { stdout: "<hierarchy rotation=\"0\" />", stderr: "" };
-				return { stdout: "", stderr: "" };
+				calls.push([...args]);
+				const stdout = dumps[Math.min(dumpCalls, dumps.length - 1)] ?? "";
+				dumpCalls += 1;
+				return { stdout, stderr: "" };
 			},
 		});
-		return { controller, dumpCalls: () => dumpCalls };
+		return { controller, dumpCalls: () => dumpCalls, calls };
 	};
-	const ok = `UI hierchary dumped to: ${remotePath}`;
+	const ok = `<hierarchy rotation="0"></hierarchy>UI hierchary dumped to: /dev/tty`;
 	const nullRoot = "ERROR: null root node returned by UiTestAutomationBridge.";
 
 	const recovers = fake([nullRoot, ok]);
 	assert.match(await recovers.controller.uiTree("emulator-5554"), /<hierarchy/u);
 	assert.equal(recovers.dumpCalls(), 2);
+	assert.deepEqual(
+		recovers.calls[0],
+		["exec-out", "uiautomator", "dump", "--compressed", "/dev/tty"],
+		"one adb call per read, with no file left on the device",
+	);
 
 	const persistent = fake([nullRoot]);
 	await assert.rejects(persistent.controller.uiTree("emulator-5554"), /null root node/u);
@@ -163,4 +148,11 @@ test("runs emulator console commands only on emulators", async () => {
 	assert.deepEqual(calls, [], "no adb command reaches a physical device");
 	await controller.sendSms("emulator-5554", "5551234", "hi");
 	assert.deepEqual(calls, [["emu", "sms", "send", "5551234", "hi"]]);
+	// The console runs one command per line; a line break would run `kill`.
+	for (const text of ["hi\nkill", "hi\rkill", "hi\0"])
+		await assert.rejects(
+			controller.sendSms("emulator-5554", "5551234", text),
+			/line breaks or control characters/u,
+		);
+	assert.equal(calls.length, 1, "no console command runs with a line break");
 });

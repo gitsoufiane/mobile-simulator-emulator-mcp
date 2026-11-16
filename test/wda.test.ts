@@ -69,6 +69,53 @@ test("switches signing teams safely, with or without an environment default", as
 	}
 });
 
+test("gives each Simulator agent its own free loopback ports", async (t) => {
+	const launched: WebDriverAgent["args"][] = [];
+	t.mock.method(WebDriverAgent.prototype, "launch", async function (this: WebDriverAgent) {
+		launched.push(this.args);
+	});
+	t.mock.method(WebDriverAgent.prototype, "quit", async () => undefined);
+	const requested: string[] = [];
+	t.mock.method(globalThis, "fetch", async (url: string) => {
+		requested.push(url);
+		return new Response(JSON.stringify({ value: { ready: true } }));
+	});
+	const simulator = async () => ({ platformVersion: "26.5" });
+	const [first, second] = [new WdaController(), new WdaController()];
+	try {
+		await first.use("sim-a", simulator, async () => undefined);
+		await second.use("sim-b", simulator, async () => undefined);
+		const ports = launched.map((args) => args.wdaLocalPort);
+		assert.equal(ports.length, 2);
+		assert.notEqual(ports[0], ports[1], "two servers never share an agent port");
+		for (const args of launched) {
+			assert.notEqual(args.wdaLocalPort, 8100);
+			assert.equal(args.wdaRemotePort, args.wdaLocalPort);
+			assert.ok(args.mjpegServerPort && args.mjpegServerPort !== 9100);
+		}
+		assert.ok(
+			requested.some((url) => url === `http://127.0.0.1:${ports[1]}/status`),
+			"requests go to the launched agent's port",
+		);
+	} finally {
+		await Promise.all([first.close(), second.close()]);
+	}
+});
+
+test("does not report another process's agent as its own", async () => {
+	const foreign = createServer((req, res) => {
+		req.resume();
+		res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ value: { ready: true } }));
+	});
+	await new Promise<void>((resolve) => foreign.listen(0, "127.0.0.1", resolve));
+	const { port } = foreign.address() as AddressInfo;
+	try {
+		assert.deepEqual(await new WdaController(`http://127.0.0.1:${port}`).status(), { running: false });
+	} finally {
+		foreign.close();
+	}
+});
+
 test("reuses one WDA session and recreates it once when WDA drops it", async () => {
 	let created = 0;
 	let live: string | undefined;

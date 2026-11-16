@@ -1,9 +1,8 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { resolve } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { type CallToolResult, Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 interface ListedDevice {
 	id: string;
@@ -51,10 +50,9 @@ async function callOk(
 }
 
 function structured(result: CallToolResult): Record<string, unknown> {
-	assert.ok(
-		result.structuredContent && typeof result.structuredContent === "object",
-	);
-	return result.structuredContent;
+	const data = result.structuredContent;
+	assert.ok(typeof data === "object" && data !== null);
+	return data as Record<string, unknown>;
 }
 
 async function uiTree(device: string): Promise<string> {
@@ -90,7 +88,8 @@ async function screenshot(
 	const image = result.content.find((item) => item.type === "image");
 	assert.ok(image && image.type === "image");
 	const data = Buffer.from(image.data, "base64");
-	assert.equal(data.subarray(0, 8).toString("hex"), "89504e470d0a1a0a");
+	const signature = image.mimeType === "image/png" ? "89504e470d0a1a0a" : "ffd8ff";
+	assert.equal(data.subarray(0, signature.length / 2).toString("hex"), signature);
 	return {
 		bytes: data.length,
 		sha256: createHash("sha256").update(data).digest("hex").slice(0, 16),
@@ -353,10 +352,20 @@ try {
 		device: ios.id,
 		appId: "com.apple.Preferences",
 	});
+	// Settings adds rows (Apple Account, Apple Intelligence) after launch, which
+	// moves General; tap only once two reads agree on its position.
+	let generalAt = "";
 	const iosSettings = await waitForUi(
 		ios.id,
-		(tree) => tree.includes('"label":"General"'),
+		(tree) => {
+			if (!tree.includes('"label":"General"')) return false;
+			const point = JSON.stringify(iosPoint(tree, "General", "Button"));
+			const settled = point === generalAt;
+			generalAt = point;
+			return settled;
+		},
 		"iOS Settings root screen",
+		20_000,
 	);
 	await tap(ios.id, iosPoint(iosSettings, "General", "Button"));
 	await pause(750);
@@ -427,7 +436,7 @@ try {
 	const negativeChecks = await Promise.all([
 		expectError(
 			"mobile_take_screenshot",
-			{ device: "android:physical-device" },
+			{ device: "android:not a serial" },
 			/Invalid online device ID/u,
 		),
 		expectError(

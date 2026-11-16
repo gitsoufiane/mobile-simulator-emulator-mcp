@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { readdir, readFile, stat, unlink, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { join } from "node:path";
-import { CommandError, run, tailLines } from "./exec.js";
+import { CommandError, run, sleep, tailLines } from "./exec.js";
 
 /** A screen recording that runs until stop() finalizes the file. */
 export interface Recording {
@@ -27,6 +27,17 @@ const DEVICECTL_ORIENTATIONS: Record<IosOrientation, string> = {
 
 const CRASH_FRAME_LIMIT = 25;
 
+const CLIPBOARD_CHECKS = 4;
+const CLIPBOARD_CHECK_MS = 250;
+
+/** The text types `devicectl device pasteboard paste` reads, in its own order. */
+const PASTEBOARD_TEXT_TYPES = new Set([
+	"public.utf8-plain-text",
+	"public.plain-text",
+	"public.text",
+	"public.url",
+]);
+
 /** Real iPhone and iPad UDIDs: `00008030-001A2B3C4D5E6F70` or 40 hex digits. */
 const PHYSICAL_IOS_UDID = /^(?:[0-9A-F]{8}-[0-9A-F]{16}|[0-9A-F]{40})$/iu;
 
@@ -43,6 +54,43 @@ export function lowerVersion(left: string, right: string): string {
 
 export function isPhysicalIosUdid(udid: string): boolean {
 	return PHYSICAL_IOS_UDID.test(udid);
+}
+
+/**
+ * Whether devicectl lacks a subcommand, as before Xcode 27. With options
+ * after the missing subcommand, devicectl names the first option instead.
+ */
+export function isMissingDevicectlCommand(error: unknown): error is CommandError {
+	return (
+		error instanceof CommandError &&
+		/unexpected argument|unknown option|not a valid|unknown (sub)?command/iu.test(
+			error.stderr + error.stdout,
+		)
+	);
+}
+
+/** `--` ends devicectl's own options, so app arguments such as -AppleLanguages or --user reach the app. */
+export function devicectlLaunchArgs(
+	udid: string,
+	bundleId: string,
+	environment: Record<string, string> | undefined,
+	appArguments: readonly string[],
+): string[] {
+	return [
+		"devicectl",
+		"device",
+		"process",
+		"launch",
+		"--device",
+		udid,
+		"--terminate-existing",
+		...(environment
+			? ["--environment-variables", JSON.stringify(environment)]
+			: []),
+		"--",
+		bundleId,
+		...appArguments,
+	];
 }
 
 function assertSimulator(udid: string): void {
@@ -262,6 +310,8 @@ export function parseIosDevices(parsed: SimctlList): IosDevice[] {
 }
 
 export class IosController {
+	private readonly pointScales = new Map<string, number>();
+
 	private simctl(
 		args: readonly string[],
 		timeoutMs = 30_000,
@@ -390,21 +440,10 @@ export class IosController {
 		if (isPhysicalIosUdid(udid)) {
 			await run(
 				"xcrun",
-				[
-					"devicectl",
-					"device",
-					"process",
-					"launch",
-					"--device",
-					udid,
-					"--terminate-existing",
-					...(options.environment
-						? ["--environment-variables", JSON.stringify(options.environment)]
-						: []),
-					bundleId,
+				devicectlLaunchArgs(udid, bundleId, options.environment, [
 					...localeArgs,
 					...(options.arguments ?? []),
-				],
+				]),
 				{ timeoutMs: 60_000 },
 			);
 			return;
@@ -432,19 +471,20 @@ export class IosController {
 	}
 
 	/** CoreDevice control; Xcode 27 `devicectl` also drives Simulators. */
-	private async devicectl(udid: string, args: readonly string[]): Promise<void> {
-		assertSimulator(udid);
+	private async devicectl(
+		udid: string,
+		args: readonly string[],
+		input?: string,
+	): Promise<string> {
 		try {
-			await run("xcrun", ["devicectl", ...args, "--device", udid], {
-				timeoutMs: 60_000,
-			});
+			const { stdout } = await run(
+				"xcrun",
+				["devicectl", ...args, "--device", udid],
+				{ timeoutMs: 60_000, ...(input === undefined ? {} : { input }) },
+			);
+			return stdout;
 		} catch (error) {
-			if (
-				error instanceof CommandError &&
-				/unexpected argument|not a valid|unknown (sub)?command/iu.test(
-					error.stderr + error.stdout,
-				)
-			)
+			if (isMissingDevicectlCommand(error))
 				throw new Error(
 					`This control needs Xcode 27 or newer (xcrun devicectl ${args.slice(0, 3).join(" ")}); ${error.message}`,
 				);
@@ -453,6 +493,8 @@ export class IosController {
 	}
 
 	async setBiometric(udid: string, action: IosBiometricAction): Promise<void> {
+		// On a device this would change the owner's real Face ID enrollment.
+		assertSimulator(udid);
 		const args = {
 			enroll: ["device", "settings", "biometrics", "--enable"],
 			unenroll: ["device", "settings", "biometrics", "--disable"],
@@ -463,6 +505,7 @@ export class IosController {
 	}
 
 	async setOrientation(udid: string, orientation: IosOrientation): Promise<void> {
+		assertSimulator(udid);
 		await this.devicectl(udid, [
 			"device",
 			"orientation",
@@ -476,10 +519,7 @@ export class IosController {
 		settings: { reduceMotion?: boolean; reduceTransparency?: boolean },
 	): Promise<void> {
 		const onOff = (value: boolean) => (value ? "on" : "off");
-		await this.devicectl(udid, [
-			"device",
-			"settings",
-			"appearance",
+		await this.deviceAppearance(udid, [
 			...(settings.reduceMotion === undefined
 				? []
 				: ["--reduce-motion", onOff(settings.reduceMotion)]),
@@ -503,13 +543,39 @@ export class IosController {
 		waypoints: ReadonlyArray<{ latitude: number; longitude: number }>,
 		speedMetersPerSecond: number,
 	): Promise<void> {
-		await this.simctl([
-			"location",
-			udid,
-			"start",
-			`--speed=${speedMetersPerSecond}`,
-			...waypoints.map(({ latitude, longitude }) => `${latitude},${longitude}`),
-		]);
+		if (isPhysicalIosUdid(udid)) {
+			const routeFile = join(tmpdir(), `mobile-mcp-${randomUUID()}.json`);
+			try {
+				await writeFile(
+					routeFile,
+					JSON.stringify({
+						mode: "interval",
+						interval: 1,
+						speed: speedMetersPerSecond,
+						waypoints,
+					}),
+				);
+				await this.devicectl(udid, [
+					"device",
+					"simulate",
+					"location",
+					"route",
+					"--route-file",
+					routeFile,
+				]);
+			} finally {
+				await unlink(routeFile).catch(() => undefined);
+			}
+			return;
+		}
+		// simctl parses a negative latitude argument ("-33.8,151.2") as an
+		// option, so the waypoints go through stdin, one per line.
+		await this.simctl(
+			["location", udid, "start", `--speed=${speedMetersPerSecond}`, "-"],
+			30_000,
+			2 * 1024 * 1024,
+			`${waypoints.map(({ latitude, longitude }) => `${latitude},${longitude}`).join("\n")}\n`,
+		);
 	}
 
 	async keychain(
@@ -525,30 +591,34 @@ export class IosController {
 		]);
 	}
 
-	/** simctl records until SIGINT; it then finalizes the file and exits 0. */
+	/**
+	 * simctl (Simulator) and devicectl (device, Xcode 27) both record until
+	 * SIGINT, then finalize the file and exit 0. simctl announces the start on
+	 * stderr and devicectl on stdout.
+	 */
 	async startVideo(udid: string, outputPath: string): Promise<Recording> {
-		assertSimulator(udid);
-		const child = spawn(
-			"xcrun",
-			["simctl", "io", udid, "recordVideo", "--codec=h264", outputPath],
-			{ stdio: ["ignore", "ignore", "pipe"] },
-		);
-		let stderr = "";
+		const args = isPhysicalIosUdid(udid)
+			? ["devicectl", "device", "capture", "screen-record", "--device", udid, "--destination", outputPath]
+			: ["simctl", "io", udid, "recordVideo", "--codec=h264", outputPath];
+		const child = spawn("xcrun", args, { stdio: ["ignore", "pipe", "pipe"] });
+		let output = "";
 		const exited = new Promise<number | null>((resolve, reject) => {
 			child.once("error", reject);
 			child.once("close", resolve);
 		});
 		const started = new Promise<void>((resolve) => {
-			child.stderr.on("data", (chunk: Buffer) => {
-				if (stderr.length < 10_000) stderr += chunk.toString();
-				if (stderr.includes("Recording started")) resolve();
-			});
+			const collect = (chunk: Buffer) => {
+				if (output.length < 10_000) output += chunk.toString();
+				if (output.includes("Recording started")) resolve();
+			};
+			child.stdout.on("data", collect);
+			child.stderr.on("data", collect);
 		});
 		const startTimeout = setTimeout(() => child.kill("SIGKILL"), 30_000);
 		try {
 			const first = await Promise.race([started.then(() => "started"), exited]);
 			if (first !== "started")
-				throw new Error(`simctl recordVideo did not start: ${stderr.trim()}`);
+				throw new Error(`xcrun ${args[0]} recording did not start: ${output.trim()}`);
 		} catch (error) {
 			if (child.exitCode === null) child.kill("SIGKILL");
 			throw error;
@@ -563,7 +633,7 @@ export class IosController {
 					const code = await exited;
 					if (code !== 0)
 						throw new Error(
-							`simctl recordVideo exited with ${String(code)}: ${stderr.trim()}`,
+							`xcrun ${args[0]} recording exited with ${String(code)}: ${output.trim()}`,
 						);
 				} finally {
 					clearTimeout(stopTimeout);
@@ -720,21 +790,44 @@ export class IosController {
 		return (await this.simctl(["ui", udid, "appearance"])).stdout.trim();
 	}
 
+	/** Xcode 27 `devicectl device settings appearance`, for Simulators and devices. */
+	private async deviceAppearance(udid: string, flags: readonly string[]): Promise<void> {
+		await this.devicectl(udid, ["device", "settings", "appearance", ...flags]);
+	}
+
 	async setAppearance(udid: string, mode: "light" | "dark"): Promise<void> {
-		await this.simctl(["ui", udid, "appearance", mode]);
+		if (isPhysicalIosUdid(udid)) await this.deviceAppearance(udid, ["--mode", mode]);
+		else await this.simctl(["ui", udid, "appearance", mode]);
 	}
 
 	async setContentSize(udid: string, size: string): Promise<void> {
-		await this.simctl(["ui", udid, "content_size", size]);
+		if (!isPhysicalIosUdid(udid)) {
+			await this.simctl(["ui", udid, "content_size", size]);
+			return;
+		}
+		if (size === "increment" || size === "decrement")
+			throw new Error(
+				`contentSize ${size} works only on iOS Simulators; pass a named size on a device`,
+			);
+		await this.deviceAppearance(udid, [
+			"--text-size",
+			size,
+			...(size.startsWith("accessibility-")
+				? ["--larger-accessibility-sizes", "on"]
+				: []),
+		]);
 	}
 
 	async setIncreaseContrast(udid: string, enabled: boolean): Promise<void> {
-		await this.simctl([
-			"ui",
-			udid,
-			"increase_contrast",
-			enabled ? "enabled" : "disabled",
-		]);
+		if (isPhysicalIosUdid(udid))
+			await this.deviceAppearance(udid, ["--increase-contrast", enabled ? "on" : "off"]);
+		else
+			await this.simctl([
+				"ui",
+				udid,
+				"increase_contrast",
+				enabled ? "enabled" : "disabled",
+			]);
 	}
 
 	async addMedia(udid: string, paths: readonly string[]): Promise<void> {
@@ -754,6 +847,23 @@ export class IosController {
 		udid: string,
 		location?: { latitude: number; longitude: number },
 	): Promise<void> {
+		if (isPhysicalIosUdid(udid)) {
+			// The `=` form keeps devicectl from reading a negative value as an option.
+			await this.devicectl(
+				udid,
+				location
+					? [
+							"device",
+							"simulate",
+							"location",
+							"coordinate",
+							`--latitude=${location.latitude}`,
+							`--longitude=${location.longitude}`,
+						]
+					: ["device", "simulate", "location", "clear"],
+			);
+			return;
+		}
 		await this.simctl(
 			location
 				? [
@@ -781,11 +891,35 @@ export class IosController {
 	}
 
 	async setClipboard(udid: string, text: string): Promise<void> {
-		await this.simctl(["pbcopy", udid], 30_000, 2 * 1024 * 1024, text);
+		if (isPhysicalIosUdid(udid))
+			await this.devicectl(udid, ["device", "pasteboard", "copy"], text);
+		else await this.simctl(["pbcopy", udid], 30_000, 2 * 1024 * 1024, text);
+		// After `devicectl device pasteboard copy` has targeted a Simulator,
+		// `simctl pbcopy` exits 0 without changing it until the next boot. A
+		// busy Simulator can also show a good write late, so check a few times.
+		for (let check = 1; (await this.getClipboard(udid)) !== text; check += 1) {
+			if (check === CLIPBOARD_CHECKS)
+				throw new Error(
+					`The pasteboard of ios:${udid} did not change. If devicectl wrote to this Simulator's pasteboard, shut the Simulator down, boot it, and retry.`,
+				);
+			await sleep(CLIPBOARD_CHECK_MS);
+		}
 	}
 
 	async getClipboard(udid: string): Promise<string> {
-		return (await this.simctl(["pbpaste", udid])).stdout;
+		if (!isPhysicalIosUdid(udid)) return (await this.simctl(["pbpaste", udid])).stdout;
+		// `paste` prints a notice such as "Pasteboard is empty." in place of
+		// text, so the stable JSON of `info` decides whether there is text.
+		const { items } = await this.devicectlJson<{
+			items?: Array<{ flavors?: Array<{ type?: string }> }>;
+		}>(["device", "pasteboard", "info", "--device", udid]);
+		if (!items?.length) return "";
+		const types = items[0]?.flavors?.flatMap(({ type }) => (type ? [type] : [])) ?? [];
+		if (!types.some((type) => PASTEBOARD_TEXT_TYPES.has(type)))
+			throw new Error(
+				`The pasteboard of ios:${udid} holds no text (${types.join(", ") || "no types"})`,
+			);
+		return this.devicectl(udid, ["device", "pasteboard", "paste"]);
 	}
 
 	async setStatusBar(
@@ -800,11 +934,39 @@ export class IosController {
 		await this.simctl(["openurl", udid, url]);
 	}
 
+	/**
+	 * Pixels per point of the main display, from Xcode 27 `devicectl device
+	 * info displays` (Simulators and devices). A display's scale never
+	 * changes, so it is read once per device.
+	 */
+	async pointScale(udid: string): Promise<number> {
+		const cached = this.pointScales.get(udid);
+		if (cached) return cached;
+		const { displays } = await this.devicectlJson<{
+			displays?: Array<{ primary?: boolean; pointScale?: unknown }>;
+		}>(["device", "info", "displays", "--device", udid]);
+		const scale = (displays?.find((display) => display.primary) ?? displays?.[0])
+			?.pointScale;
+		if (typeof scale !== "number" || scale < 1)
+			throw new Error(`devicectl reported no point scale for ios:${udid}`);
+		this.pointScales.set(udid, scale);
+		return scale;
+	}
+
+	/** Devices need Xcode 27 `devicectl device capture`; older Xcode falls back to WebDriverAgent. */
 	async screenshot(udid: string): Promise<Buffer> {
 		// Xcode 26 documents `-` as stdout but writes a literal file named `-`.
 		const output = join(tmpdir(), `mobile-mcp-${randomUUID()}.png`);
 		try {
-			await this.simctl(["io", udid, "screenshot", "--type=png", output]);
+			if (isPhysicalIosUdid(udid))
+				await this.devicectl(udid, [
+					"device",
+					"capture",
+					"screenshot",
+					"--destination",
+					output,
+				]);
+			else await this.simctl(["io", udid, "screenshot", "--type=png", output]);
 			return await readFile(output);
 		} finally {
 			// safe to ignore: temp cleanup must not hide the screenshot result.

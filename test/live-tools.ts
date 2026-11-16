@@ -1,8 +1,7 @@
 import assert from "node:assert/strict";
 import { resolve } from "node:path";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { StdioClientTransport } from "@modelcontextprotocol/sdk/client/stdio.js";
-import type { CallToolResult } from "@modelcontextprotocol/sdk/types.js";
+import { type CallToolResult, Client } from "@modelcontextprotocol/client";
+import { StdioClientTransport } from "@modelcontextprotocol/client/stdio";
 
 // Live gate for the discovery/appearance/gesture tools added in 0.3.0.
 // Android runs in full. iOS runs only the paths that do not need
@@ -17,10 +16,9 @@ interface ListedDevice {
 
 function structured(result: CallToolResult): Record<string, unknown> {
 	if (result.isError) throw new Error(JSON.stringify(result.content));
-	assert.ok(
-		result.structuredContent && typeof result.structuredContent === "object",
-	);
-	return result.structuredContent;
+	const data = result.structuredContent;
+	assert.ok(typeof data === "object" && data !== null);
+	return data as Record<string, unknown>;
 }
 
 const transport = new StdioClientTransport({

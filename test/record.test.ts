@@ -3,11 +3,10 @@ import { mkdtemp, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { Client } from "@modelcontextprotocol/sdk/client/index.js";
-import { InMemoryTransport } from "@modelcontextprotocol/sdk/inMemory.js";
+import { Client, InMemoryTransport } from "@modelcontextprotocol/client";
 import type { AndroidController } from "../src/android.js";
 import type { IosController } from "../src/ios.js";
-import { createMobileServer } from "../src/server.js";
+import { closeControllers, createMobileServer } from "../src/server.js";
 import type { WdaController } from "../src/wda.js";
 
 const device = "android:emulator-5554";
@@ -23,26 +22,54 @@ async function connect() {
 			},
 		}),
 	};
-	const created = createMobileServer({
-		controllers: {
-			android: android as unknown as AndroidController,
-			ios: {} as IosController,
-			wda: {} as WdaController,
-		},
-	});
-	const client = new Client({ name: "record-test", version: "1.0.0" });
-	const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
-	await Promise.all([client.connect(clientTransport), created.server.connect(serverTransport)]);
+	const controllers = {
+		android: android as unknown as AndroidController,
+		ios: {} as IosController,
+		wda: { close: async () => undefined } as WdaController,
+		recordings: new Map(),
+		simulatedLocations: new Set<string>(),
+	};
+	// HTTP builds a server per request, so two servers share the controllers.
+	const clients = await Promise.all(
+		["record-test", "record-test-other"].map(async (name) => {
+			const server = createMobileServer({ controllers });
+			const client = new Client({ name, version: "1.0.0" });
+			const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+			await Promise.all([client.connect(clientTransport), server.connect(serverTransport)]);
+			return client;
+		}),
+	);
+	const on = (client: Client | undefined) => (args: Record<string, unknown>) => {
+		assert.ok(client);
+		return client.callTool({ name: "mobile_record_screen", arguments: { device, ...args } });
+	};
 	return {
-		call: (args: Record<string, unknown>) =>
-			client.callTool({ name: "mobile_record_screen", arguments: { device, ...args } }),
+		call: on(clients[0]),
+		callOther: on(clients[1]),
 		stops: () => stops,
+		closeControllers: () => closeControllers(controllers),
 		close: async () => {
-			await client.close();
-			await created.close();
+			await Promise.all(clients.map((client) => client.close()));
+			await closeControllers(controllers);
 		},
 	};
 }
+
+test("stops a recording from another server, and finalizes open ones on close", async () => {
+	const session = await connect();
+	try {
+		await session.call({ action: "start", path: "shared.mp4", durationSeconds: 60 });
+		const stopped = await session.callOther({ action: "stop" });
+		assert.equal(stopped.isError, undefined, JSON.stringify(stopped.content));
+		assert.equal(session.stops(), 1);
+
+		await session.call({ action: "start", path: "open.mp4", durationSeconds: 60 });
+		await session.closeControllers();
+		assert.equal(session.stops(), 2, "shutdown finalizes the open recording");
+	} finally {
+		await session.close();
+	}
+});
 
 test("starts a recording, refuses a second one, and stops it once", async () => {
 	const session = await connect();
